@@ -1,10 +1,13 @@
 {
   "name": "@hung101/whatsapp-store",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Minimal Baileys data storage for your favorite DBMS built with Prisma",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "repository": "https://github.com/hung101/whatsapp-store.git",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hung101/whatsapp-store.git"
+  },
   "author": "Hung (https://github.com/hung101)",
   "license": "MIT",
   "scripts": {
