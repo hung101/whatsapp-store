@@ -15,8 +15,8 @@ model Chat {
   sessionId                 String
   archived                  Boolean?
   contactPrimaryIdentityKey Bytes?
-  conversationTimestamp     BigInt?
-  createdAt                 BigInt?
+  conversationTimestamp     Json?
+  createdAt                 Json?
   createdBy                 String?
   description               String?
   disappearingMode          Json?
@@ -24,16 +24,16 @@ model Chat {
   endOfHistoryTransfer      Boolean?
   endOfHistoryTransferType  Int?
   ephemeralExpiration       Int?
-  ephemeralSettingTimestamp BigInt?
+  ephemeralSettingTimestamp Json?
   id                        String
   isDefaultSubgroup         Boolean?
   isParentGroup             Boolean?
-  lastMsgTimestamp          BigInt?
+  lastMsgTimestamp          Json?
   lidJid                    String?
   markedAsUnread            Boolean?
   mediaVisibility           Int?
   messages                  Json?
-  muteEndTime               BigInt?
+  muteEndTime               Json?
   name                      String?
   newJid                    String?
   notSpam                   Boolean?
@@ -49,8 +49,8 @@ model Chat {
   support                   Boolean?
   suspended                 Boolean?
   tcToken                   Bytes?
-  tcTokenSenderTimestamp    BigInt?
-  tcTokenTimestamp          BigInt?
+  tcTokenSenderTimestamp    Json?
+  tcTokenTimestamp          Json?
   terminated                Boolean?
   unreadCount               Int?
   unreadMentionCount        Int?
@@ -88,7 +88,7 @@ model Message {
   ephemeralDuration               Int?
   ephemeralOffToOn                Boolean?
   ephemeralOutOfSync              Boolean?
-  ephemeralStartTimestamp         BigInt?
+  ephemeralStartTimestamp         Json?
   finalLiveLocation               Json?
   futureproofData                 Bytes?
   ignore                          Boolean?
@@ -98,11 +98,11 @@ model Message {
   mediaCiphertextSha256           Bytes?
   mediaData                       Json?
   message                         Json?
-  messageC2STimestamp             BigInt?
+  messageC2STimestamp             Json?
   messageSecret                   Bytes?
   messageStubParameters           Json?
   messageStubType                 Int?
-  messageTimestamp                BigInt?
+  messageTimestamp                Json?
   multicast                       Boolean?
   originalSelfAuthorUserJidString String?
   participant                     String?
@@ -114,7 +114,7 @@ model Message {
   quotedPaymentInfo               Json?
   quotedStickerData               Json?
   reactions                       Json?
-  revokeMessageTimestamp          BigInt?
+  revokeMessageTimestamp          Json?
   starred                         Boolean?
   status                          Int?
   statusAlreadyViewed             Boolean?
@@ -123,6 +123,7 @@ model Message {
   urlText                         Boolean?
   userReceipt                     Json?
   verifiedBizName                 String?
+  eventResponses                  Json?
 
   @@unique([sessionId, remoteJid, id], map: "unique_message_key_per_session_id")
   @@index([sessionId])

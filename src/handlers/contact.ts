@@ -1,5 +1,5 @@
 import type { BaileysEventEmitter } from '@whiskeysockets/baileys';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime';
+import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
 import { transformPrisma } from '../utils';
@@ -71,7 +71,7 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
           where: { sessionId_id: { id: update.id!, sessionId } },
         });
       } catch (e) {
-        if (e instanceof PrismaClientKnownRequestError && e.code === 'P2025') {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
           return logger.info({ update }, 'Got update for non existent contact');
         }
         logger.error(e, 'An error occured during contact update');
