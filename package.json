@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-store",
-  "version": "1.2.17",
+  "version": "1.2.18",
   "description": "Minimal Baileys data storage for your favorite DBMS built with Prisma",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,7 +29,7 @@
     "typescript": "^4.9.3"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "github:WhiskeySockets/Baileys#fix-missing-messages",
     "tiny-invariant": "^1.3.1"
   },
   "peerDependencies": {
