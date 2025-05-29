@@ -1,4 +1,4 @@
-import type { BaileysEventEmitter } from '@whiskeysockets/baileys';
+import type { BaileysEventEmitter } from 'baileys';
 import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
@@ -64,16 +64,26 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
 
   const update: BaileysEventHandler<'contacts.update'> = async (updates) => {
     for (const update of updates) {
+      if (!update.id) {
+        logger.warn({ update }, 'Skipping contact update with no ID');
+        continue;
+      }
+      
       try {
-        await prisma.contact.update({
+        const contactId = update.id;
+        const transformedData = transformPrisma(update);
+        
+        await prisma.contact.upsert({
           select: { pkId: true },
-          data: transformPrisma(update),
-          where: { sessionId_id: { id: update.id!, sessionId } },
+          create: { 
+            ...transformedData,
+            id: contactId,
+            sessionId 
+          },
+          update: transformedData,
+          where: { sessionId_id: { id: contactId, sessionId } },
         });
       } catch (e) {
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          return logger.info({ update }, 'Got update for non existent contact');
-        }
         logger.error(e, 'An error occured during contact update');
       }
     }

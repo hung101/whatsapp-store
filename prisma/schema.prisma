@@ -15,7 +15,7 @@ model Chat {
   sessionId                 String
   archived                  Boolean?
   contactPrimaryIdentityKey Bytes?
-  conversationTimestamp     Json?
+  conversationTimestamp     Int?
   createdAt                 Json?
   createdBy                 String?
   description               String?
@@ -98,11 +98,11 @@ model Message {
   mediaCiphertextSha256           Bytes?
   mediaData                       Json?
   message                         Json?
-  messageC2STimestamp             Json?
+  messageC2STimestamp             Int?
   messageSecret                   Bytes?
   messageStubParameters           Json?
   messageStubType                 Int?
-  messageTimestamp                Json?
+  messageTimestamp                Int?
   multicast                       Boolean?
   originalSelfAuthorUserJidString String?
   participant                     String?
@@ -114,7 +114,7 @@ model Message {
   quotedPaymentInfo               Json?
   quotedStickerData               Json?
   reactions                       Json?
-  revokeMessageTimestamp          Json?
+  revokeMessageTimestamp          Int?
   starred                         Boolean?
   status                          Int?
   statusAlreadyViewed             Boolean?

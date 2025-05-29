@@ -1,4 +1,4 @@
-> 🚨 **NOTICE**: `@whiskeysockets/baileys` which is this project relied on, has been discontinued. Thus, this project will be archived and stopped receiving updates anymore. Thanks everyone who's been part of this❤️
+> 🚨 **NOTICE**: `baileys` which is this project relied on, has been discontinued. Thus, this project will be archived and stopped receiving updates anymore. Thanks everyone who's been part of this❤️
 
 ---
 
@@ -54,13 +54,21 @@ Before you can actually use this library, you have to setup your database first
 
 ```ts
 import pino from 'pino';
-import makeWASocket from '@whiskeysockets/baileys';
+import makeWASocket from 'baileys';
 import { PrismaClient } from '@prisma/client';
 import { initStore, Store } from '@ookamiiixd/baileys-store';
 
 const logger = pino();
 const socket = makeWASocket();
-const prisma = new PrismaClient();
+
+// Configure Prisma client with increased transaction timeout
+const prisma = new PrismaClient({
+  transactionOptions: {
+    timeout: 60000, // 60 seconds (increase from default 5 seconds)
+    maxWait: 30000, // 30 seconds max wait time
+    isolationLevel: 'ReadCommitted', // Optional: set isolation level
+  },
+});
 
 // You only need to run this once
 initStore({
@@ -74,6 +82,19 @@ const store = new Store('unique-session-id-here', socket.ev);
 // That's it, you can now query from the prisma client without having to worry about handling the events
 const messages = prisma.message.findMany();
 ```
+
+## Transaction Timeout Issue
+
+If you encounter the `P2028` error (transaction timeout), it's because the default transaction timeout is 5 seconds. When processing large amounts of data (like message history), transactions may take longer. You can:
+
+1. **Increase the timeout** (shown above) - Set `timeout` to 60000ms (60 seconds) or higher
+2. **Optimize database performance** - Ensure proper indexing and database optimization
+3. **Batch operations** - Process data in smaller chunks if dealing with very large datasets
+
+For production environments, consider:
+- Setting `timeout` to at least 30-60 seconds
+- Monitoring database performance
+- Using connection pooling if needed
 
 ## Contributing
 

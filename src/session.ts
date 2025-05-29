@@ -1,6 +1,6 @@
-import type { AuthenticationCreds, SignalDataTypeMap } from '@whiskeysockets/baileys';
-import { proto } from '@whiskeysockets/baileys';
-import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys';
+import type { AuthenticationCreds, SignalDataTypeMap } from 'baileys';
+import { proto } from 'baileys';
+import { BufferJSON, initAuthCreds } from 'baileys';
 import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from './shared';
 
@@ -12,12 +12,23 @@ export async function useSession(sessionId: string) {
 
   const write = async (data: any, id: string) => {
     try {
-      data = JSON.stringify(data, BufferJSON.replacer);
+      const jsonData = JSON.stringify(data, BufferJSON.replacer);
+      
+      try {
+        JSON.parse(jsonData, BufferJSON.reviver);
+      } catch (parseError) {
+        logger.error(
+          { id, parseError, dataLength: jsonData?.length },
+          'Cannot serialize session data properly. Skipping write.'
+        );
+        return;
+      }
+      
       id = fixId(id);
       await model.upsert({
         select: { pkId: true },
-        create: { data, id, sessionId },
-        update: { data },
+        create: { data: jsonData, id, sessionId },
+        update: { data: jsonData },
         where: { sessionId_id: { id, sessionId } },
       });
     } catch (e) {
@@ -27,17 +38,33 @@ export async function useSession(sessionId: string) {
 
   const read = async (id: string) => {
     try {
-      const { data } = await model.findUniqueOrThrow({
+      const result = await model.findUnique({
         select: { data: true },
         where: { sessionId_id: { id: fixId(id), sessionId } },
       });
-      return JSON.parse(data, BufferJSON.reviver);
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-        logger.info({ id }, 'Trying to read non existent session data');
-      } else {
-        logger.error(e, 'An error occured during session read');
+      
+      if (!result || typeof result.data === 'undefined') {
+        logger.info({ id }, 'Session data not found or value is undefined');
+        return null;
       }
+      
+      try {
+        return JSON.parse(result.data, BufferJSON.reviver);
+      } catch (parseError) {
+        logger.error(
+          { id, error: parseError, dataLength: result.data?.length }, 
+          'Failed to parse session data JSON. The data might be corrupted.'
+        );
+        
+        if (id === 'creds') {
+          logger.info('Returning fresh credentials due to parsing error');
+          return initAuthCreds();
+        }
+        
+        return null;
+      }
+    } catch (e) {
+      logger.error(e, 'An error occured during session read');
       return null;
     }
   };
