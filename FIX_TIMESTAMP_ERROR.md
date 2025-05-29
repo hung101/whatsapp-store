@@ -72,4 +72,35 @@ If you see similar errors with other timestamp fields, you may need to update ad
 - `tcTokenTimestamp`
 - `ephemeralStartTimestamp`
 
-Follow the same pattern: change from `Json?` to `Int?` in the schema and run the appropriate migration. 
+Follow the same pattern: change from `Json?` to `Int?` in the schema and run the appropriate migration.
+
+---
+
+# Fix for PrismaClientValidationError: Serialized Buffer Objects
+
+## Problem
+You may also encounter a `PrismaClientValidationError` when the system tries to process serialized Buffer objects that come in this format:
+```json
+"messageSecret": {
+  "type": "Buffer",
+  "data": [151,44,6,203,66,235,101,78,238,124,125,58,112,32,104,0,51,130,114,18,203,158,122,210,194,232,184,78,28,77,18,7]
+}
+```
+
+## Root Cause
+The `transformPrisma` function wasn't handling serialized Buffer objects properly. These objects have a `type: "Buffer"` property and a `data` array, but the function was treating them as regular JSON objects instead of converting them to proper Buffer instances.
+
+## Solution
+The `transformPrisma` function in `src/utils.ts` has been updated to detect and properly convert serialized Buffer objects:
+
+```typescript
+// Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
+if ((val as any).type === 'Buffer' && Array.isArray((val as any).data)) {
+  obj[key] = Buffer.from((val as any).data);
+} else {
+  // For Prisma's JSON fields, we pass the object directly
+  obj[key] = val;
+}
+```
+
+This ensures that fields like `messageSecret`, `mediaCiphertextSha256`, and other binary fields are properly converted to Buffer instances before being stored in the database. 

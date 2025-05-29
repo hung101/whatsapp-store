@@ -19,9 +19,14 @@ export function transformPrisma<T extends Record<string, any>>(
     } else if (typeof val === 'number' || val instanceof Long) {
       obj[key] = toNumber(val);
     } else if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
-      // For Prisma's JSON fields, we pass the object directly
-      // Prisma will properly format it for MySQL's JSON type
-      obj[key] = val;
+      // Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
+      if ((val as any).type === 'Buffer' && Array.isArray((val as any).data)) {
+        obj[key] = Buffer.from((val as any).data);
+      } else {
+        // For Prisma's JSON fields, we pass the object directly
+        // Prisma will properly format it for MySQL's JSON type
+        obj[key] = val;
+      }
     } else if (removeNullable && (typeof val === 'undefined' || val === null)) {
       delete obj[key];
     }
