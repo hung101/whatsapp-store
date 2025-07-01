@@ -76,6 +76,11 @@ export async function useSession(sessionId: string) {
         where: { sessionId_id: { id: fixId(id), sessionId } },
       });
     } catch (e) {
+      // P2025: Record to delete does not exist - this is expected behavior
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+        logger.debug({ id, sessionId }, 'Session record already deleted or does not exist');
+        return;
+      }
       logger.error(e, 'An error occured during session delete');
     }
   };
