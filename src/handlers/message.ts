@@ -7,15 +7,20 @@ import type {
 import { jidNormalizedUser, toNumber } from 'baileys';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
-import { transformPrisma } from '../utils';
+import { transformPrisma, validateMessageData } from '../utils';
 
 const getKeyAuthor = (key: WAMessageKey | undefined | null) =>
   (key?.fromMe ? 'me' : key?.participant || key?.remoteJid) || '';
 
-export default function messageHandler(sessionId: string, event: BaileysEventEmitter) {
+export default function messageHandler(sessionId: string, event: BaileysEventEmitter, getJid: Function | undefined = undefined) {
   const prisma = usePrisma();
   const logger = useLogger();
   let listening = false;
+
+  const resolveRemoteJid = (key: WAMessageKey): string => {
+    const jidByLid = typeof getJid === 'function' ? getJid(key.id || '') : undefined;
+    return jidNormalizedUser(jidByLid ?? key.remoteJid!);
+  };
 
   // Configurable batch sizes based on environment or dataset size
   const getBatchConfig = (messageCount: number) => {
@@ -77,9 +82,10 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                 const messagesToUpdate = [];
 
                 for (const message of batch) {
+                  const jid = resolveRemoteJid(message.key);
                   const transformedMessage = {
                     ...transformPrisma(message),
-                    remoteJid: message.key.remoteJid!,
+                    remoteJid: jid,
                     id: message.key.id!,
                     sessionId,
                   };
@@ -89,7 +95,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                     where: {
                       sessionId_remoteJid_id: {
                         sessionId,
-                        remoteJid: message.key.remoteJid!,
+                        remoteJid: jid,
                         id: message.key.id!,
                       },
                     },
@@ -101,7 +107,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                       where: {
                         sessionId_remoteJid_id: {
                           sessionId,
-                          remoteJid: message.key.remoteJid!,
+                          remoteJid: jid,
                           id: message.key.id!,
                         },
                       },
@@ -114,8 +120,11 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
 
                 // Bulk create new messages
                 if (messagesToCreate.length > 0) {
+                  // Validate and transform messages before bulk insertion
+                  const validatedMessages = messagesToCreate.map((msg) => validateMessageData(msg));
+
                   await tx.message.createMany({
-                    data: messagesToCreate,
+                    data: validatedMessages as any,
                     skipDuplicates: true,
                   });
                 }
@@ -162,12 +171,16 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
       case 'notify':
         for (const message of messages) {
           try {
-            const jid = jidNormalizedUser(message.key.remoteJid!);
+            const jid = resolveRemoteJid(message.key);
             const data = transformPrisma(message);
+            
+            // Validate data before upsert
+            const validatedData = validateMessageData(data);
+            
             await prisma.message.upsert({
               select: { pkId: true },
-              create: { ...data, remoteJid: jid, id: message.key.id!, sessionId },
-              update: { ...data },
+              create: { ...validatedData, remoteJid: jid, id: message.key.id!, sessionId },
+              update: { ...validatedData },
               where: { sessionId_remoteJid_id: { remoteJid: jid, id: message.key.id!, sessionId } },
             });
 
@@ -192,9 +205,10 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   const update: BaileysEventHandler<'messages.update'> = async (updates) => {
     for (const { update, key } of updates) {
       try {
+        const jid = resolveRemoteJid(key);
         await prisma.$transaction(async (tx) => {
           const prevData = await tx.message.findFirst({
-            where: { id: key.id!, remoteJid: key.remoteJid!, sessionId },
+            where: { id: key.id!, remoteJid: jid, sessionId },
           });
           if (!prevData) {
             return logger.info({ update }, 'Got update for non existent message');
@@ -206,14 +220,14 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
             where: {
               sessionId_remoteJid_id: {
                 id: key.id!,
-                remoteJid: key.remoteJid!,
+                remoteJid: jid,
                 sessionId,
               },
             },
             create: {
               ...transformPrisma(data),
               id: data.key.id!,
-              remoteJid: data.key.remoteJid!,
+              remoteJid: jid,
               sessionId,
             },
             update: {
@@ -248,10 +262,11 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   const updateReceipt: BaileysEventHandler<'message-receipt.update'> = async (updates) => {
     for (const { key, receipt } of updates) {
       try {
+        const jid = resolveRemoteJid(key);
         await prisma.$transaction(async (tx) => {
           const message = await tx.message.findFirst({
             select: { userReceipt: true },
-            where: { id: key.id!, remoteJid: key.remoteJid!, sessionId },
+            where: { id: key.id!, remoteJid: jid, sessionId },
           });
           if (!message) {
             return logger.debug({ update }, 'Got receipt update for non existent message');
@@ -270,7 +285,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
             select: { pkId: true },
             data: transformPrisma({ userReceipt: userReceipt }),
             where: {
-              sessionId_remoteJid_id: { id: key.id!, remoteJid: key.remoteJid!, sessionId },
+              sessionId_remoteJid_id: { id: key.id!, remoteJid: jid, sessionId },
             },
           });
         }, {
@@ -285,10 +300,11 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   const updateReaction: BaileysEventHandler<'messages.reaction'> = async (reactions) => {
     for (const { key, reaction } of reactions) {
       try {
+        const jid = resolveRemoteJid(key);
         await prisma.$transaction(async (tx) => {
           const message = await tx.message.findFirst({
             select: { reactions: true },
-            where: { id: key.id!, remoteJid: key.remoteJid!, sessionId },
+            where: { id: key.id!, remoteJid: jid, sessionId },
           });
           if (!message) {
             return logger.debug({ update }, 'Got reaction update for non existent message');
@@ -306,7 +322,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
             select: { pkId: true },
             data: transformPrisma({ reactions: updatedReactions }),
             where: {
-              sessionId_remoteJid_id: { id: key.id!, remoteJid: key.remoteJid!, sessionId },
+              sessionId_remoteJid_id: { id: key.id!, remoteJid: jid, sessionId },
             },
           });
         }, {

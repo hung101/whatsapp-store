@@ -1,13 +1,19 @@
 import type { BaileysEventEmitter } from 'baileys';
+import { jidNormalizedUser } from 'baileys';
 import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
 import { transformPrisma } from '../utils';
 
-export default function chatHandler(sessionId: string, event: BaileysEventEmitter) {
+export default function chatHandler(sessionId: string, event: BaileysEventEmitter, getJid: Function | undefined = undefined) {
   const prisma = usePrisma();
   const logger = useLogger();
   let listening = false;
+
+  const resolveChatId = (id: string | undefined): string => {
+    const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
+    return jidNormalizedUser(jidByLid ?? id!);
+  };
 
   const set: BaileysEventHandler<'messaging-history.set'> = async ({ chats, isLatest }) => {
     try {
@@ -16,20 +22,25 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
         // Process chats in batches to avoid timeout
         const BATCH_SIZE = 100;
+        const normalizedChats = chats.map((c) => {
+          const id = resolveChatId(c.id);
+          const data = transformPrisma(c);
+          return { ...data, id };
+        });
         const existingIds = (
           await tx.chat.findMany({
             select: { id: true },
-            where: { id: { in: chats.map((c) => c.id) }, sessionId },
+            where: { id: { in: normalizedChats.map((c) => c.id) }, sessionId },
           })
         ).map((i) => i.id);
         
-        const newChats = chats.filter((c) => !existingIds.includes(c.id));
+        const newChats = normalizedChats.filter((c) => !existingIds.includes(c.id));
         let totalAdded = 0;
         
         for (let i = 0; i < newChats.length; i += BATCH_SIZE) {
           const batch = newChats.slice(i, i + BATCH_SIZE);
           const result = await tx.chat.createMany({
-            data: batch.map((c) => ({ ...transformPrisma(c), sessionId })),
+            data: batch.map((c) => ({ ...c, sessionId })),
           });
           totalAdded += result.count;
         }
@@ -45,9 +56,13 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
   const upsert: BaileysEventHandler<'chats.upsert'> = async (chats) => {
     try {
+      const normalizedChats = chats.map((c) => {
+        const id = resolveChatId(c.id);
+        const data = transformPrisma(c);
+        return { ...data, id };
+      });
       await Promise.any(
-        chats
-          .map((c) => transformPrisma(c))
+        normalizedChats
           .map((data) =>
             prisma.chat.upsert({
               select: { pkId: true },
@@ -70,7 +85,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
       }
       
       try {
-        const chatId = update.id;
+        const chatId = resolveChatId(update.id);
         const data = transformPrisma(update);
         
         await prisma.chat.upsert({
@@ -99,8 +114,9 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
   const del: BaileysEventHandler<'chats.delete'> = async (ids) => {
     try {
+      const normalizedIds = ids.map((id) => resolveChatId(id));
       await prisma.chat.deleteMany({
-        where: { id: { in: ids } },
+        where: { id: { in: normalizedIds } },
       });
     } catch (e) {
       logger.error(e, 'An error occured during chats delete');

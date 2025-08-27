@@ -21,10 +21,10 @@ export class Store {
   private readonly messageHandler;
   private readonly contactHandler;
 
-  constructor(sessionId: string, event: BaileysEventEmitter) {
-    this.chatHandler = handlers.chatHandler(sessionId, event);
-    this.messageHandler = handlers.messageHandler(sessionId, event);
-    this.contactHandler = handlers.contactHandler(sessionId, event);
+  constructor(sessionId: string, event: BaileysEventEmitter, private getJid: Function | undefined = undefined) {
+    this.chatHandler = handlers.chatHandler(sessionId, event, this.getJid);
+    this.messageHandler = handlers.messageHandler(sessionId, event, this.getJid);
+    this.contactHandler = handlers.contactHandler(sessionId, event, this.getJid);
     this.listen();
   }
 

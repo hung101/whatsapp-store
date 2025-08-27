@@ -62,3 +62,90 @@ export function serializePrisma<T extends Record<string, any>>(
 
   return obj;
 }
+
+/**
+ * Validate message data before Prisma operations
+ * This helps catch validation errors early and provides better error messages
+ */
+export function validateMessageData(data: any): any {
+  const validated = { ...data };
+  
+  // Ensure timestamp fields are numbers
+  if (validated.messageTimestamp !== undefined) {
+    if (typeof validated.messageTimestamp === 'string') {
+      const numVal = parseInt(validated.messageTimestamp, 10);
+      validated.messageTimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.messageTimestamp !== 'number') {
+      validated.messageTimestamp = 0;
+    }
+  }
+  
+  if (validated.messageC2STimestamp !== undefined) {
+    if (typeof validated.messageC2STimestamp === 'string') {
+      const numVal = parseInt(validated.messageC2STimestamp, 10);
+      validated.messageC2STimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.messageC2STimestamp !== 'number') {
+      validated.messageC2STimestamp = 0;
+    }
+  }
+  
+  // Ensure messageSecret is a Buffer
+  if (validated.messageSecret && typeof validated.messageSecret === 'string') {
+    try {
+      validated.messageSecret = Buffer.from(validated.messageSecret, 'base64');
+    } catch (e) {
+      // If base64 conversion fails, remove the field to avoid validation errors
+      delete validated.messageSecret;
+    }
+  }
+  
+  // Remove undefined values that could cause Prisma validation errors
+  Object.keys(validated).forEach(key => {
+    if (validated[key] === undefined) {
+      delete validated[key];
+    }
+  });
+  
+  return validated;
+}
+
+/**
+ * Wrapper for Prisma operations that provides better error handling
+ * and validation error messages
+ */
+export async function safePrismaOperation<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  logger?: any
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      // Unique constraint violation
+      const message = `Duplicate entry detected in ${operationName}. This usually means the data already exists.`;
+      if (logger) logger.warn(message);
+      throw new Error(message);
+    } else if (error?.code === 'P2003') {
+      // Foreign key constraint violation
+      const message = `Referenced record not found in ${operationName}. Check if related records exist.`;
+      if (logger) logger.error(message);
+      throw new Error(message);
+    } else if (error?.code === 'P2025') {
+      // Record not found
+      const message = `Record not found in ${operationName}.`;
+      if (logger) logger.warn(message);
+      throw new Error(message);
+    } else if (error?.name === 'PrismaClientValidationError') {
+      // Validation error - provide detailed information
+      const message = `Data validation failed in ${operationName}: ${error.message}`;
+      if (logger) logger.error({ error, operationName }, message);
+      throw new Error(message);
+    } else {
+      // Generic error
+      const message = `Database operation failed in ${operationName}: ${error.message}`;
+      if (logger) logger.error({ error, operationName }, message);
+      throw new Error(message);
+    }
+  }
+}
