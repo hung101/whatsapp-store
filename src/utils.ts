@@ -70,6 +70,34 @@ export function serializePrisma<T extends Record<string, any>>(
 export function validateMessageData(data: any): any {
   const validated = { ...data };
   
+  // List of fields that exist in the Prisma Message schema
+  const validFields = [
+    'sessionId', 'remoteJid', 'id', 'agentId', 'bizPrivacyStatus', 'broadcast',
+    'clearMedia', 'duration', 'ephemeralDuration', 'ephemeralOffToOn', 'ephemeralOutOfSync',
+    'ephemeralStartTimestamp', 'finalLiveLocation', 'futureproofData', 'ignore',
+    'keepInChat', 'key', 'labels', 'mediaCiphertextSha256', 'mediaData', 'message',
+    'messageC2STimestamp', 'messageSecret', 'messageStubParameters', 'messageStubType',
+    'messageTimestamp', 'multicast', 'originalSelfAuthorUserJidString', 'participant',
+    'paymentInfo', 'photoChange', 'pollAdditionalMetadata', 'pollUpdates', 'pushName',
+    'quotedPaymentInfo', 'quotedStickerData', 'reactions', 'revokeMessageTimestamp',
+    'starred', 'status', 'statusAlreadyViewed', 'statusPsa', 'urlNumber', 'urlText',
+    'userReceipt', 'verifiedBizName', 'eventResponses'
+  ];
+  
+  // Filter out unknown fields that don't exist in the schema
+  const filteredFields: string[] = [];
+  Object.keys(validated).forEach(key => {
+    if (!validFields.includes(key)) {
+      filteredFields.push(key);
+      delete validated[key];
+    }
+  });
+  
+  // Log filtered fields for debugging (only if there are any)
+  if (filteredFields.length > 0) {
+    console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
+  }
+  
   // Ensure timestamp fields are numbers
   if (validated.messageTimestamp !== undefined) {
     if (typeof validated.messageTimestamp === 'string') {

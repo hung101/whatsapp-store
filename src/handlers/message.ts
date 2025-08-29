@@ -122,6 +122,19 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                 if (messagesToCreate.length > 0) {
                   // Validate and transform messages before bulk insertion
                   const validatedMessages = messagesToCreate.map((msg) => validateMessageData(msg));
+                  
+                  // Log validation summary for bulk operations
+                  const totalOriginalFields = messagesToCreate.reduce((sum, msg) => sum + Object.keys(msg).length, 0);
+                  const totalValidatedFields = validatedMessages.reduce((sum, msg) => sum + Object.keys(msg).length, 0);
+                  
+                  if (totalOriginalFields !== totalValidatedFields) {
+                    logger.info({ 
+                      batchSize: messagesToCreate.length,
+                      totalOriginalFields,
+                      totalValidatedFields,
+                      fieldsFiltered: totalOriginalFields - totalValidatedFields
+                    }, 'Bulk message validation filtered out unknown fields');
+                  }
 
                   await tx.message.createMany({
                     data: validatedMessages as any,
@@ -176,6 +189,15 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
             
             // Validate data before upsert
             const validatedData = validateMessageData(data);
+            
+            // Log if any fields were filtered out during validation
+            if (Object.keys(validatedData).length !== Object.keys(data).length) {
+              logger.info({ 
+                messageId: message.key.id,
+                originalFieldCount: Object.keys(data).length,
+                validatedFieldCount: Object.keys(validatedData).length
+              }, 'Message data was filtered during validation');
+            }
             
             await prisma.message.upsert({
               select: { pkId: true },
