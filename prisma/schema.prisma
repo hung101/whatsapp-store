@@ -14,12 +14,9 @@ model Chat {
   pkId                      BigInt   @id @default(autoincrement())
   sessionId                 String
   archived                  Boolean?
-  contactPrimaryIdentityKey Bytes?
   conversationTimestamp     Int?
   createdAt                 Json?
   createdBy                 String?
-  description               String?
-  disappearingMode          Json?
   displayName               String?
   endOfHistoryTransfer      Boolean?
   endOfHistoryTransferType  Int?
@@ -40,7 +37,6 @@ model Chat {
   oldJid                    String?
   pHash                     String?
   parentGroupId             String?
-  participant               Json?
   pinned                    Int?
   pnJid                     String?
   pnhDuplicateLidThread     Boolean?
@@ -48,13 +44,11 @@ model Chat {
   shareOwnPn                Boolean?
   support                   Boolean?
   suspended                 Boolean?
-  tcToken                   Bytes?
   tcTokenSenderTimestamp    Json?
   tcTokenTimestamp          Json?
   terminated                Boolean?
   unreadCount               Int?
   unreadMentionCount        Int?
-  wallpaper                 Json?
   lastMessageRecvTimestamp  Int?
 
   @@unique([sessionId, id], map: "unique_id_per_session_id_chat")

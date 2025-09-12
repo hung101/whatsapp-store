@@ -10,16 +10,33 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
   const logger = useLogger();
   let listening = false;
 
-  const resolveContactId = (id: string | undefined): string => {
+  const resolveContactId = (id: string | undefined, contact?: any): string => {
+    // Prefer primary number when we get a LID id and contact carries pn/jid
+    if (id?.endsWith('@lid')) {
+      const candidate = (contact?.senderPn || contact?.pnJid || contact?.jid) as string | undefined;
+      if (candidate) {
+        return jidNormalizedUser(candidate);
+      }
+    }
     const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
     return jidNormalizedUser(jidByLid ?? id!);
+  };
+
+  const sanitizeContactData = (raw: any) => {
+    // Only keep fields that exist in the Contact model
+    const allowed = ['id', 'name', 'notify', 'verifiedName', 'imgUrl', 'status'];
+    const out: any = {};
+    for (const k of allowed) {
+      if (raw[k] !== undefined) out[k] = raw[k];
+    }
+    return out;
   };
 
   const set: BaileysEventHandler<'messaging-history.set'> = async ({ contacts }) => {
     try {
       const normalizedContacts = contacts.map((c) => {
-        const id = resolveContactId(c.id);
-        const data = transformPrisma(c);
+        const id = resolveContactId(c.id, c);
+        const data = sanitizeContactData(transformPrisma(c));
         return { ...data, id };
       });
       const contactIds = normalizedContacts.map((c) => c.id);
@@ -56,8 +73,8 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
   const upsert: BaileysEventHandler<'contacts.upsert'> = async (contacts) => {
     try {
       const normalizedContacts = contacts.map((c) => {
-        const id = resolveContactId(c.id);
-        const data = transformPrisma(c);
+        const id = resolveContactId(c.id, c);
+        const data = sanitizeContactData(transformPrisma(c));
         return { ...data, id };
       });
       await Promise.any(
@@ -83,8 +100,8 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
       }
       
       try {
-        const contactId = resolveContactId(update.id);
-        const transformedData = transformPrisma(update);
+        const contactId = resolveContactId(update.id, update);
+        const transformedData = sanitizeContactData(transformPrisma(update));
         
         await prisma.contact.upsert({
           select: { pkId: true },

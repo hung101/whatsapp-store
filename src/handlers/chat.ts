@@ -10,7 +10,14 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
   const logger = useLogger();
   let listening = false;
 
-  const resolveChatId = (id: string | undefined): string => {
+  const resolveChatId = (id: string | undefined, chatOrUpdate?: any): string => {
+    // Prefer primary number JID when id is a LID
+    if (id?.endsWith('@lid')) {
+      const candidate: string | undefined = chatOrUpdate?.pnJid || chatOrUpdate?.senderPn || chatOrUpdate?.jid;
+      if (candidate) {
+        return jidNormalizedUser(candidate);
+      }
+    }
     const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
     return jidNormalizedUser(jidByLid ?? id!);
   };
@@ -23,7 +30,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
         // Process chats in batches to avoid timeout
         const BATCH_SIZE = 100;
         const normalizedChats = chats.map((c) => {
-          const id = resolveChatId(c.id);
+          const id = resolveChatId(c.id, c);
           const data = transformPrisma(c);
           return { ...data, id };
         });
@@ -56,21 +63,48 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
   const upsert: BaileysEventHandler<'chats.upsert'> = async (chats) => {
     try {
-      const normalizedChats = chats.map((c) => {
-        const id = resolveChatId(c.id);
+      // Normalize and de-duplicate by resolved id (keep the last occurrence)
+      const dedupedById = new Map<string, any>();
+      for (const c of chats) {
+        const id = resolveChatId(c.id, c);
         const data = transformPrisma(c);
-        return { ...data, id };
-      });
-      await Promise.any(
-        normalizedChats
-          .map((data) =>
-            prisma.chat.upsert({
+        dedupedById.set(id, { ...data, id });
+      }
+
+      const normalizedChats = Array.from(dedupedById.values());
+
+      // Robust per-item upsert with fallback to handle rare race conditions (P2002)
+      await Promise.all(
+        normalizedChats.map(async (data) => {
+          try {
+            await prisma.chat.upsert({
               select: { pkId: true },
               create: { ...data, sessionId },
-              update: data,
+              update: { ...data, id: undefined },
               where: { sessionId_id: { id: data.id, sessionId } },
-            })
-          )
+            });
+          } catch (e: any) {
+            if (e?.code === 'P2002') {
+              // Unique constraint hit due to concurrent create elsewhere: fall back to update
+              try {
+                await prisma.chat.update({
+                  select: { pkId: true },
+                  data: { ...data, id: undefined },
+                  where: { sessionId_id: { id: data.id, sessionId } },
+                });
+              } catch (e2: any) {
+                if (e2?.code === 'P2025') {
+                  // Record missing when updating -> create instead
+                  await prisma.chat.create({ select: { pkId: true }, data: { ...data, sessionId } });
+                } else {
+                  throw e2;
+                }
+              }
+            } else {
+              throw e;
+            }
+          }
+        })
       );
     } catch (e) {
       logger.error(e, 'An error occured during chats upsert');
@@ -85,7 +119,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
       }
       
       try {
-        const chatId = resolveChatId(update.id);
+        const chatId = resolveChatId(update.id, update);
         const data = transformPrisma(update);
         
         await prisma.chat.upsert({
@@ -97,6 +131,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
           },
           update: {
             ...data,
+            id: undefined,
             unreadCount:
               typeof data.unreadCount === 'number'
                 ? data.unreadCount > 0
