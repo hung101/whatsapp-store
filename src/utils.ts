@@ -14,7 +14,10 @@ export function transformPrisma<T extends Record<string, any>>(
   const obj = { ...data } as any;
 
   for (const [key, val] of Object.entries(obj)) {
-    if (val instanceof Uint8Array) {
+    if (typeof val === 'function') {
+      // Remove function properties as they cannot be serialized to JSON
+      delete obj[key];
+    } else if (val instanceof Uint8Array) {
       obj[key] = Buffer.from(val);
     } else if (typeof val === 'number' || val instanceof Long) {
       obj[key] = toNumber(val);
@@ -23,15 +26,86 @@ export function transformPrisma<T extends Record<string, any>>(
       if ((val as any).type === 'Buffer' && Array.isArray((val as any).data)) {
         obj[key] = Buffer.from((val as any).data);
       } else {
-        // For Prisma's JSON fields, we pass the object directly
-        // Prisma will properly format it for MySQL's JSON type
-        obj[key] = val;
+        // For Prisma's JSON fields, recursively clean the object to remove functions
+        obj[key] = cleanObjectForPrisma(val);
       }
     } else if (removeNullable && (typeof val === 'undefined' || val === null)) {
       delete obj[key];
     }
   }
 
+  return obj;
+}
+
+/**
+ * Recursively clean an object to remove functions and other non-serializable values
+ * This prevents Prisma serialization errors when storing complex objects as JSON
+ */
+function cleanObjectForPrisma(obj: any): any {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  
+  // Debug: Log when we're cleaning an object that looks like a Buffer
+  if (typeof obj === 'object' && obj !== null && obj.type === 'Buffer') {
+    // Log via console for immediate visibility
+    console.error('[cleanObjectForPrisma] Processing Buffer-like object:', { type: obj.type, hasData: Array.isArray(obj.data) });
+  }
+  
+  if (typeof obj === 'function') {
+    return undefined; // Functions cannot be serialized
+  }
+  
+  if (typeof obj === 'symbol') {
+    return undefined; // Symbols cannot be serialized
+  }
+  
+  if (obj instanceof Date) {
+    return obj.toISOString(); // Convert dates to ISO strings
+  }
+  
+  if (obj instanceof Buffer) {
+    return obj; // Keep buffers as-is
+  }
+  
+  // Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
+  if (typeof obj === 'object' && obj !== null && obj.type === 'Buffer' && Array.isArray(obj.data)) {
+    // Debug logging for Buffer conversion
+    console.error('[cleanObjectForPrisma] Converting Buffer object:', { type: obj.type, dataLength: obj.data.length });
+    return Buffer.from(obj.data);
+  }
+  
+  // Handle Long objects from Baileys (e.g., {low: x, high: y, unsigned: z})
+  if (typeof obj === 'object' && 
+      typeof obj.low === 'number' && 
+      typeof obj.high === 'number' && 
+      typeof obj.unsigned === 'boolean') {
+    return toNumber(obj);
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj
+      .map(item => cleanObjectForPrisma(item))
+      .filter(item => item !== undefined); // Remove undefined items
+  }
+  
+  if (typeof obj === 'object') {
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Debug: Log when we encounter nested objects
+      if (typeof value === 'object' && value !== null && (value as any).type === 'Buffer') {
+        console.error(`[cleanObjectForPrisma] Found nested Buffer in key: ${key}`);
+      }
+      
+      const cleanedValue = cleanObjectForPrisma(value);
+      if (cleanedValue !== undefined) {
+        cleaned[key] = cleanedValue;
+      }
+    }
+    return cleaned;
+  }
+  
+  // For primitive values (string, number, boolean), return as-is
   return obj;
 }
 
@@ -68,10 +142,34 @@ export function serializePrisma<T extends Record<string, any>>(
  * This helps catch validation errors early and provides better error messages
  */
 export function validateMessageData(data: any): any {
-  const validated = { ...data };
+  // First, deeply clean the entire data object to handle all nested Buffers and Long objects
+  const cleanedData = cleanObjectForPrisma(data);
+  const validated = { ...cleanedData };
+  
+  // Check if we still have Buffer objects after cleaning and log to error if found
+  const cleanedDataStr = JSON.stringify(validated);
+  const hasBuffersAfter = cleanedDataStr.includes('"type":"Buffer"');
+  
+  if (hasBuffersAfter) {
+    // Force convert any remaining Buffer objects using aggressive string replacement
+    const finalData = JSON.parse(cleanedDataStr.replace(/"type":"Buffer","data":\[([^\]]+)\]/g, (match, dataArray) => {
+      try {
+        const dataNumbers = dataArray.split(',').map((n: string) => parseInt(n.trim()));
+        const buffer = Buffer.from(dataNumbers);
+        return JSON.stringify(buffer);
+      } catch (e) {
+        return '{}'; // Fallback to empty object if parsing fails
+      }
+    }));
+    
+    Object.assign(validated, finalData);
+  }
   
   // List of fields that exist in the Prisma Message schema
   const validFields = [
+    // Prisma internal fields
+    'pkId',
+    // Schema fields
     'sessionId', 'remoteJid', 'id', 'agentId', 'bizPrivacyStatus', 'broadcast',
     'clearMedia', 'duration', 'ephemeralDuration', 'ephemeralOffToOn', 'ephemeralOutOfSync',
     'ephemeralStartTimestamp', 'finalLiveLocation', 'futureproofData', 'ignore',
@@ -98,6 +196,11 @@ export function validateMessageData(data: any): any {
     console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
   }
   
+  // Debug: Check if reportingTokenInfo is still present after filtering
+  if (validated.reportingTokenInfo) {
+    console.error('[validateMessageData] WARNING: reportingTokenInfo still present after filtering!');
+  }
+  
   // Ensure timestamp fields are numbers
   if (validated.messageTimestamp !== undefined) {
     if (typeof validated.messageTimestamp === 'string') {
@@ -117,13 +220,80 @@ export function validateMessageData(data: any): any {
     }
   }
   
-  // Ensure messageSecret is a Buffer
+  // Ensure messageSecret is a Buffer (fallback for any missed cases)
   if (validated.messageSecret && typeof validated.messageSecret === 'string') {
     try {
       validated.messageSecret = Buffer.from(validated.messageSecret, 'base64');
     } catch (e) {
       // If base64 conversion fails, remove the field to avoid validation errors
       delete validated.messageSecret;
+    }
+  }
+  
+  // Remove undefined values that could cause Prisma validation errors
+  Object.keys(validated).forEach(key => {
+    if (validated[key] === undefined) {
+      delete validated[key];
+    }
+  });
+  
+  return validated;
+}
+
+/**
+ * Validate chat data before Prisma operations
+ * This helps catch validation errors early and provides better error messages
+ */
+export function validateChatData(data: any): any {
+  // First, deeply clean the entire data object to handle all nested Buffers and Long objects
+  const cleanedData = cleanObjectForPrisma(data);
+  const validated = { ...cleanedData };
+  
+  // List of fields that exist in the Prisma Chat schema
+  const validFields = [
+    // Prisma internal fields
+    'pkId',
+    // Schema fields
+    'sessionId', 'archived', 'conversationTimestamp', 'createdAt', 'createdBy',
+    'displayName', 'endOfHistoryTransfer', 'endOfHistoryTransferType', 'ephemeralExpiration',
+    'ephemeralSettingTimestamp', 'id', 'isDefaultSubgroup', 'isParentGroup', 'lastMsgTimestamp',
+    'lidJid', 'markedAsUnread', 'mediaVisibility', 'messages', 'muteEndTime', 'name',
+    'newJid', 'notSpam', 'oldJid', 'pHash', 'parentGroupId', 'pinned', 'pnJid',
+    'pnhDuplicateLidThread', 'readOnly', 'shareOwnPn', 'support', 'suspended',
+    'tcTokenSenderTimestamp', 'tcTokenTimestamp', 'terminated', 'unreadCount',
+    'unreadMentionCount', 'lastMessageRecvTimestamp'
+  ];
+  
+  // Filter out unknown fields that don't exist in the schema
+  const filteredFields: string[] = [];
+  Object.keys(validated).forEach(key => {
+    if (!validFields.includes(key)) {
+      filteredFields.push(key);
+      delete validated[key];
+    }
+  });
+  
+  // Log filtered fields for debugging (only if there are any)
+  if (filteredFields.length > 0) {
+    console.log(`[validateChatData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
+  }
+  
+  // Ensure timestamp fields are numbers
+  if (validated.conversationTimestamp !== undefined) {
+    if (typeof validated.conversationTimestamp === 'string') {
+      const numVal = parseInt(validated.conversationTimestamp, 10);
+      validated.conversationTimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.conversationTimestamp !== 'number') {
+      validated.conversationTimestamp = 0;
+    }
+  }
+  
+  if (validated.lastMessageRecvTimestamp !== undefined) {
+    if (typeof validated.lastMessageRecvTimestamp === 'string') {
+      const numVal = parseInt(validated.lastMessageRecvTimestamp, 10);
+      validated.lastMessageRecvTimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.lastMessageRecvTimestamp !== 'number') {
+      validated.lastMessageRecvTimestamp = 0;
     }
   }
   

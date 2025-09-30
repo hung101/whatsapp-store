@@ -237,6 +237,29 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
           }
 
           const data = { ...prevData, ...update } as proto.IWebMessageInfo;
+          const transformedData = transformPrisma(data);
+          
+          // Validate and filter data before upsert
+          const validatedData = validateMessageData(transformedData);
+          
+          // Additional debug logging for Buffer issues
+          if (JSON.stringify(validatedData).includes('"type":"Buffer"')) {
+            logger.error({ 
+              messageId: key.id,
+              issue: 'Buffer objects still present after validation',
+              data: validatedData
+            }, 'Buffer serialization issue detected');
+          }
+          
+          // Log if any fields were filtered out during validation
+          if (Object.keys(validatedData).length !== Object.keys(transformedData).length) {
+            logger.info({ 
+              messageId: key.id,
+              originalFieldCount: Object.keys(transformedData).length,
+              validatedFieldCount: Object.keys(validatedData).length
+            }, 'Message data was filtered during validation in update');
+          }
+          
           await tx.message.upsert({
             select: { pkId: true },
             where: {
@@ -247,13 +270,13 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
               },
             },
             create: {
-              ...transformPrisma(data),
+              ...validatedData,
               id: data.key.id!,
               remoteJid: jid,
               sessionId,
             },
             update: {
-              ...transformPrisma(data),
+              ...validatedData,
             },
           });
         }, {

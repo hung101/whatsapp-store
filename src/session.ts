@@ -97,7 +97,7 @@ export async function useSession(sessionId: string) {
             ids.map(async (id) => {
               let value = await read(`${type}-${id}`);
               if (type === 'app-state-sync-key' && value) {
-                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                value = proto.Message.AppStateSyncKeyData.create(value);
               }
               data[id] = value;
             })

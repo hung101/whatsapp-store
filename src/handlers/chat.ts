@@ -3,7 +3,7 @@ import { jidNormalizedUser } from 'baileys';
 import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
-import { transformPrisma } from '../utils';
+import { transformPrisma, validateChatData } from '../utils';
 
 export default function chatHandler(sessionId: string, event: BaileysEventEmitter, getJid: Function | undefined = undefined) {
   const prisma = usePrisma();
@@ -31,8 +31,9 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
         const BATCH_SIZE = 100;
         const normalizedChats = chats.map((c) => {
           const id = resolveChatId(c.id, c);
-          const data = transformPrisma(c);
-          return { ...data, id };
+          const transformedData = transformPrisma(c);
+          const validatedData = validateChatData(transformedData);
+          return { ...validatedData, id };
         });
         const existingIds = (
           await tx.chat.findMany({
@@ -67,8 +68,9 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
       const dedupedById = new Map<string, any>();
       for (const c of chats) {
         const id = resolveChatId(c.id, c);
-        const data = transformPrisma(c);
-        dedupedById.set(id, { ...data, id });
+        const transformedData = transformPrisma(c);
+        const validatedData = validateChatData(transformedData);
+        dedupedById.set(id, { ...validatedData, id });
       }
 
       const normalizedChats = Array.from(dedupedById.values());
@@ -120,23 +122,24 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
       
       try {
         const chatId = resolveChatId(update.id, update);
-        const data = transformPrisma(update);
+        const transformedData = transformPrisma(update);
+        const validatedData = validateChatData(transformedData);
         
         await prisma.chat.upsert({
           select: { pkId: true },
           create: { 
-            ...data,
+            ...validatedData,
             id: chatId,
             sessionId 
           },
           update: {
-            ...data,
+            ...validatedData,
             id: undefined,
             unreadCount:
-              typeof data.unreadCount === 'number'
-                ? data.unreadCount > 0
-                  ? { increment: data.unreadCount }
-                  : { set: data.unreadCount }
+              typeof validatedData.unreadCount === 'number'
+                ? validatedData.unreadCount > 0
+                  ? { increment: validatedData.unreadCount }
+                  : { set: validatedData.unreadCount }
                 : undefined,
           },
           where: { sessionId_id: { id: chatId, sessionId } },
