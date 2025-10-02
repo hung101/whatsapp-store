@@ -24,10 +24,16 @@ export function transformPrisma<T extends Record<string, any>>(
     } else if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
       // Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
       if ((val as any).type === 'Buffer' && Array.isArray((val as any).data)) {
-        obj[key] = Buffer.from((val as any).data);
+        // Special handling for Bytes fields like messageSecret, mediaCiphertextSha256
+        if (key === 'messageSecret' || key === 'mediaCiphertextSha256') {
+          obj[key] = Buffer.from((val as any).data);
+        } else {
+          // For JSON fields containing Buffer data, convert to base64 string
+          obj[key] = Buffer.from((val as any).data).toString('base64');
+        }
       } else {
         // For Prisma's JSON fields, recursively clean the object to remove functions
-        obj[key] = cleanObjectForPrisma(val);
+        obj[key] = cleanObjectForPrisma(val, key);
       }
     } else if (removeNullable && (typeof val === 'undefined' || val === null)) {
       delete obj[key];
@@ -41,7 +47,7 @@ export function transformPrisma<T extends Record<string, any>>(
  * Recursively clean an object to remove functions and other non-serializable values
  * This prevents Prisma serialization errors when storing complex objects as JSON
  */
-function cleanObjectForPrisma(obj: any): any {
+function cleanObjectForPrisma(obj: any, parentKey?: string): any {
   if (obj === null || obj === undefined) {
     return obj;
   }
@@ -68,11 +74,41 @@ function cleanObjectForPrisma(obj: any): any {
     return obj; // Keep buffers as-is
   }
   
+  // Handle objects that look like a numeric-indexed byte dictionary: {"0":83, "1":118, ...}
+  if (
+    typeof obj === 'object' &&
+    obj !== null &&
+    !Array.isArray(obj) &&
+    Object.keys(obj).length > 0 &&
+    Object.keys(obj).every((k) => /^\d+$/.test(k)) &&
+    Object.values(obj).every((v) => typeof v === 'number')
+  ) {
+    try {
+      const entries = Object.entries(obj)
+        .map(([k, v]) => [parseInt(k, 10), v as number] as const)
+        .sort((a, b) => a[0] - b[0]);
+      const bytes = Uint8Array.from(entries.map(([, v]) => v));
+      const b64 = Buffer.from(bytes).toString('base64');
+      console.error('[cleanObjectForPrisma] Converted numeric-keyed byte object to base64', { length: bytes.length, parentKey });
+      return b64;
+    } catch (e) {
+      console.error('[cleanObjectForPrisma] Failed to convert numeric-keyed byte object', e);
+      // fall through to regular handling
+    }
+  }
+
   // Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
   if (typeof obj === 'object' && obj !== null && obj.type === 'Buffer' && Array.isArray(obj.data)) {
     // Debug logging for Buffer conversion
-    console.error('[cleanObjectForPrisma] Converting Buffer object:', { type: obj.type, dataLength: obj.data.length });
-    return Buffer.from(obj.data);
+    console.error('[cleanObjectForPrisma] Converting Buffer object:', { type: obj.type, dataLength: obj.data.length, parentKey });
+    // For JSON storage in Prisma, convert to base64 string instead of Buffer instance
+    try {
+      const buffer = Buffer.from(obj.data);
+      return buffer.toString('base64');
+    } catch (e) {
+      console.error('[cleanObjectForPrisma] Failed to convert Buffer data to base64:', e);
+      return null; // Return null if conversion fails
+    }
   }
   
   // Handle Long objects from Baileys (e.g., {low: x, high: y, unsigned: z})
@@ -85,7 +121,7 @@ function cleanObjectForPrisma(obj: any): any {
   
   if (Array.isArray(obj)) {
     return obj
-      .map(item => cleanObjectForPrisma(item))
+      .map(item => cleanObjectForPrisma(item, parentKey))
       .filter(item => item !== undefined); // Remove undefined items
   }
   
@@ -97,7 +133,7 @@ function cleanObjectForPrisma(obj: any): any {
         console.error(`[cleanObjectForPrisma] Found nested Buffer in key: ${key}`);
       }
       
-      const cleanedValue = cleanObjectForPrisma(value);
+      const cleanedValue = cleanObjectForPrisma(value, key);
       if (cleanedValue !== undefined) {
         cleaned[key] = cleanedValue;
       }
@@ -138,31 +174,57 @@ export function serializePrisma<T extends Record<string, any>>(
 }
 
 /**
+ * Deeply convert any BigInt values to Number to ensure JSON.stringify safety
+ * and compatibility with Prisma inputs/logging.
+ */
+function normalizeBigIntDeep(input: any): any {
+  if (input === null || input === undefined) return input;
+  if (typeof input === 'bigint') return Number(input);
+  if (Array.isArray(input)) return input.map((v) => normalizeBigIntDeep(v));
+  if (typeof input === 'object') {
+    const out: any = Array.isArray(input) ? [] : {};
+    for (const [k, v] of Object.entries(input)) {
+      out[k] = normalizeBigIntDeep(v);
+    }
+    return out;
+  }
+  return input;
+}
+
+/**
  * Validate message data before Prisma operations
  * This helps catch validation errors early and provides better error messages
  */
 export function validateMessageData(data: any): any {
   // First, deeply clean the entire data object to handle all nested Buffers and Long objects
   const cleanedData = cleanObjectForPrisma(data);
-  const validated = { ...cleanedData };
+  // Normalize BigInt early to avoid JSON.stringify errors in diagnostics below
+  let validated = normalizeBigIntDeep({ ...cleanedData });
   
   // Check if we still have Buffer objects after cleaning and log to error if found
-  const cleanedDataStr = JSON.stringify(validated);
+  const cleanedDataStr = JSON.stringify(validated, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
   const hasBuffersAfter = cleanedDataStr.includes('"type":"Buffer"');
   
   if (hasBuffersAfter) {
     // Force convert any remaining Buffer objects using aggressive string replacement
-    const finalData = JSON.parse(cleanedDataStr.replace(/"type":"Buffer","data":\[([^\]]+)\]/g, (match, dataArray) => {
-      try {
-        const dataNumbers = dataArray.split(',').map((n: string) => parseInt(n.trim()));
-        const buffer = Buffer.from(dataNumbers);
-        return JSON.stringify(buffer);
-      } catch (e) {
-        return '{}'; // Fallback to empty object if parsing fails
-      }
-    }));
-    
-    Object.assign(validated, finalData);
+    try {
+      const fixedJsonStr = cleanedDataStr.replace(/\{"type":"Buffer","data":\[([^\]]+)\]\}/g, (match, dataArray) => {
+        try {
+          const dataNumbers = dataArray.split(',').map((n: string) => parseInt(n.trim()));
+          const buffer = Buffer.from(dataNumbers);
+          // Convert to base64 string for JSON storage
+          return `"${buffer.toString('base64')}"`;
+        } catch (e) {
+          return 'null'; // Fallback to null if parsing fails
+        }
+      });
+      
+      const finalData = JSON.parse(fixedJsonStr);
+      Object.assign(validated, finalData);
+    } catch (parseError) {
+      // If JSON parsing still fails, log the error and continue with the original data
+      console.error('[validateMessageData] Failed to fix Buffer serialization, using original data');
+    }
   }
   
   // List of fields that exist in the Prisma Message schema
@@ -193,7 +255,7 @@ export function validateMessageData(data: any): any {
   
   // Log filtered fields for debugging (only if there are any)
   if (filteredFields.length > 0) {
-    console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
+    // console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
   }
   
   // Debug: Check if reportingTokenInfo is still present after filtering
@@ -201,20 +263,24 @@ export function validateMessageData(data: any): any {
     console.error('[validateMessageData] WARNING: reportingTokenInfo still present after filtering!');
   }
   
-  // Ensure timestamp fields are numbers
+  // Ensure timestamp fields are numbers (avoid BigInt to prevent JSON/logging issues and match Prisma Int clients)
   if (validated.messageTimestamp !== undefined) {
     if (typeof validated.messageTimestamp === 'string') {
       const numVal = parseInt(validated.messageTimestamp, 10);
       validated.messageTimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.messageTimestamp === 'bigint') {
+      validated.messageTimestamp = Number(validated.messageTimestamp);
     } else if (typeof validated.messageTimestamp !== 'number') {
       validated.messageTimestamp = 0;
     }
   }
-  
+
   if (validated.messageC2STimestamp !== undefined) {
     if (typeof validated.messageC2STimestamp === 'string') {
       const numVal = parseInt(validated.messageC2STimestamp, 10);
       validated.messageC2STimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.messageC2STimestamp === 'bigint') {
+      validated.messageC2STimestamp = Number(validated.messageC2STimestamp);
     } else if (typeof validated.messageC2STimestamp !== 'number') {
       validated.messageC2STimestamp = 0;
     }
@@ -275,14 +341,16 @@ export function validateChatData(data: any): any {
   
   // Log filtered fields for debugging (only if there are any)
   if (filteredFields.length > 0) {
-    console.log(`[validateChatData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
+    // console.log(`[validateChatData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
   }
   
-  // Ensure timestamp fields are numbers
+  // Ensure timestamp fields are numbers (avoid BigInt for compatibility)
   if (validated.conversationTimestamp !== undefined) {
     if (typeof validated.conversationTimestamp === 'string') {
       const numVal = parseInt(validated.conversationTimestamp, 10);
       validated.conversationTimestamp = isNaN(numVal) ? 0 : numVal;
+    } else if (typeof validated.conversationTimestamp === 'bigint') {
+      validated.conversationTimestamp = Number(validated.conversationTimestamp);
     } else if (typeof validated.conversationTimestamp !== 'number') {
       validated.conversationTimestamp = 0;
     }
@@ -334,6 +402,12 @@ export async function safePrismaOperation<T>(
       const message = `Record not found in ${operationName}.`;
       if (logger) logger.warn(message);
       throw new Error(message);
+    } else if (error?.code === 'P2034') {
+      // Transaction conflict/deadlock - these should be retried by the caller
+      const message = `Transaction conflict or deadlock in ${operationName}. Retry recommended.`;
+      if (logger) logger.warn({ error, operationName }, message);
+      // Re-throw the original error so retry logic can handle it
+      throw error;
     } else if (error?.name === 'PrismaClientValidationError') {
       // Validation error - provide detailed information
       const message = `Data validation failed in ${operationName}: ${error.message}`;
@@ -346,4 +420,50 @@ export async function safePrismaOperation<T>(
       throw new Error(message);
     }
   }
+}
+
+/**
+ * Retry database operations with exponential backoff for deadlock recovery
+ */
+export async function retryDatabaseOperation<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  logger?: any,
+  maxRetries: number = 3,
+  baseDelay: number = 100
+): Promise<T> {
+  let lastError: any;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Only retry for specific retryable errors
+      if (error?.code === 'P2034' || error?.message?.includes('deadlock') || error?.message?.includes('write conflict')) {
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1) + Math.random() * 100; // Add jitter
+          if (logger) {
+            logger.warn({
+              attempt,
+              maxRetries,
+              delay,
+              error: error.code || error.name,
+              operationName
+            }, `Retrying ${operationName} after ${delay}ms due to ${error.code || 'database conflict'}`);
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+      
+      // If it's not retryable or we've exhausted retries, throw the error
+      throw error;
+    }
+  }
+  
+  // This should never be reached, but just in case
+  throw lastError;
 }

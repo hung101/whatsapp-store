@@ -7,7 +7,7 @@ import type {
 import { jidNormalizedUser, toNumber } from 'baileys';
 import { useLogger, usePrisma } from '../shared';
 import type { BaileysEventHandler } from '../types';
-import { transformPrisma, validateMessageData } from '../utils';
+import { transformPrisma, validateMessageData, retryDatabaseOperation } from '../utils';
 
 const getKeyAuthor = (key: WAMessageKey | undefined | null) =>
   (key?.fromMe ? 'me' : key?.participant || key?.remoteJid) || '';
@@ -111,7 +111,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                           id: message.key.id!,
                         },
                       },
-                      data: transformPrisma(message),
+                      data: validateMessageData(transformPrisma(message)),
                     });
                   } else {
                     messagesToCreate.push(transformedMessage);
@@ -199,12 +199,16 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
               }, 'Message data was filtered during validation');
             }
             
-            await prisma.message.upsert({
-              select: { pkId: true },
-              create: { ...validatedData, remoteJid: jid, id: message.key.id!, sessionId },
-              update: { ...validatedData },
-              where: { sessionId_remoteJid_id: { remoteJid: jid, id: message.key.id!, sessionId } },
-            });
+            await retryDatabaseOperation(
+              () => prisma.message.upsert({
+                select: { pkId: true },
+                create: { ...validatedData, remoteJid: jid, id: message.key.id!, sessionId },
+                update: { ...validatedData },
+                where: { sessionId_remoteJid_id: { remoteJid: jid, id: message.key.id!, sessionId } },
+              }),
+              'message.upsert',
+              logger
+            );
 
             const chatExists = (await prisma.chat.count({ where: { id: jid, sessionId } })) > 0;
             if (type === 'notify' && !chatExists) {
@@ -228,7 +232,8 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
     for (const { update, key } of updates) {
       try {
         const jid = resolveRemoteJid(key);
-        await prisma.$transaction(async (tx) => {
+        await retryDatabaseOperation(
+          () => prisma.$transaction(async (tx) => {
           const prevData = await tx.message.findFirst({
             where: { id: key.id!, remoteJid: jid, sessionId },
           });
@@ -281,7 +286,10 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
           });
         }, {
           timeout: 10000, // 10 seconds
-        });
+        }),
+        'message.update.transaction',
+        logger
+      );
       } catch (e) {
         logger.error(e, 'An error occured during message update');
       }
@@ -308,7 +316,8 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
     for (const { key, receipt } of updates) {
       try {
         const jid = resolveRemoteJid(key);
-        await prisma.$transaction(async (tx) => {
+        await retryDatabaseOperation(
+          () => prisma.$transaction(async (tx) => {
           const message = await tx.message.findFirst({
             select: { userReceipt: true },
             where: { id: key.id!, remoteJid: jid, sessionId },
@@ -328,14 +337,17 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
 
           await tx.message.update({
             select: { pkId: true },
-            data: transformPrisma({ userReceipt: userReceipt }),
+            data: validateMessageData(transformPrisma({ userReceipt: userReceipt })),
             where: {
               sessionId_remoteJid_id: { id: key.id!, remoteJid: jid, sessionId },
             },
           });
         }, {
           timeout: 10000, // 10 seconds
-        });
+        }),
+        'message.receipt.update.transaction',
+        logger
+      );
       } catch (e) {
         logger.error(e, 'An error occured during message receipt update');
       }
@@ -346,7 +358,8 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
     for (const { key, reaction } of reactions) {
       try {
         const jid = resolveRemoteJid(key);
-        await prisma.$transaction(async (tx) => {
+        await retryDatabaseOperation(
+          () => prisma.$transaction(async (tx) => {
           const message = await tx.message.findFirst({
             select: { reactions: true },
             where: { id: key.id!, remoteJid: jid, sessionId },
@@ -365,14 +378,17 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
           
           await tx.message.update({
             select: { pkId: true },
-            data: transformPrisma({ reactions: updatedReactions }),
+            data: validateMessageData(transformPrisma({ reactions: updatedReactions })),
             where: {
               sessionId_remoteJid_id: { id: key.id!, remoteJid: jid, sessionId },
             },
           });
         }, {
           timeout: 10000, // 10 seconds
-        });
+        }),
+        'message.reaction.update.transaction',
+        logger
+      );
       } catch (e) {
         logger.error(e, 'An error occured during message reaction update');
       }

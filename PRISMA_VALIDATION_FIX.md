@@ -114,7 +114,7 @@ export function validateMessageData(data: any): any {
   
   // Log filtered fields for debugging
   if (filteredFields.length > 0) {
-    console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
+    // console.log(`[validateMessageData] Filtered out unknown fields: ${filteredFields.join(', ')}`);
   }
   
   // Ensure timestamp fields are numbers
