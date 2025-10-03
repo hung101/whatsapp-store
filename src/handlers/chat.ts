@@ -18,8 +18,16 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
         return jidNormalizedUser(candidate);
       }
     }
-    const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
-    return jidNormalizedUser(jidByLid ?? id!);
+    let jid = undefined;
+    if (chatOrUpdate.remoteJid && chatOrUpdate.remoteJidAlt) {
+      if (!chatOrUpdate.remoteJid.includes('s.whatsapp.net') && chatOrUpdate.remoteJidAlt.includes('s.whatsapp.net')) {
+        jid = chatOrUpdate.remoteJidAlt;
+      }
+      else if (chatOrUpdate.remoteJid.includes('s.whatsapp.net')) {
+        jid = chatOrUpdate.remoteJid;
+      }
+    }
+    return jidNormalizedUser(jid ?? chatOrUpdate.remoteJid!);
   };
 
   const set: BaileysEventHandler<'messaging-history.set'> = async ({ chats, isLatest }) => {

@@ -18,8 +18,16 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
         return jidNormalizedUser(candidate);
       }
     }
-    const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
-    return jidNormalizedUser(jidByLid ?? id!);
+    let jid = undefined;
+    if (contact.remoteJid && contact.remoteJidAlt) {
+      if (!contact.remoteJid.includes('s.whatsapp.net') && contact.remoteJidAlt.includes('s.whatsapp.net')) {
+        jid = contact.remoteJidAlt;
+      }
+      else if (contact.remoteJid.includes('s.whatsapp.net')) {
+        jid = contact.remoteJid;
+      }
+    }
+    return jidNormalizedUser(jid ?? contact.remoteJid!);
   };
 
   const sanitizeContactData = (raw: any) => {
