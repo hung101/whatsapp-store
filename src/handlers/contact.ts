@@ -11,14 +11,14 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
   let listening = false;
 
   const resolveContactId = (id: string | undefined, contact?: any): string => {
-    // Prefer primary number when we get a LID id and contact carries pn/jid
-    // if (id?.endsWith('@lid')) {
-    //   const candidate = (contact?.senderPn || contact?.pnJid || contact?.jid) as string | undefined;
-    //   if (candidate) {
-    //     return jidNormalizedUser(candidate);
-    //   }
-    // }
     console.log("contactHandler:contact:", contact);
+    // Prefer primary number when we get a LID id and contact carries pn/jid
+    if (id?.endsWith('@lid')) {
+      const candidate = (contact?.senderPn || contact?.pnJid || contact?.jid) as string | undefined;
+      if (candidate) {
+        return jidNormalizedUser(candidate);
+      }
+    }
     let jid = undefined;
     if (contact.remoteJid && contact.remoteJidAlt) {
       if (!contact.remoteJid.includes('s.whatsapp.net') && contact.remoteJidAlt.includes('s.whatsapp.net')) {
