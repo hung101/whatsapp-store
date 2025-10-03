@@ -12,12 +12,13 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
   const resolveChatId = (id: string | undefined, chatOrUpdate?: any): string => {
     // Prefer primary number JID when id is a LID
-    if (id?.endsWith('@lid')) {
-      const candidate: string | undefined = chatOrUpdate?.pnJid || chatOrUpdate?.senderPn || chatOrUpdate?.jid;
-      if (candidate) {
-        return jidNormalizedUser(candidate);
-      }
-    }
+    // if (id?.endsWith('@lid')) {
+    //   const candidate: string | undefined = chatOrUpdate?.pnJid || chatOrUpdate?.senderPn || chatOrUpdate?.jid;
+    //   if (candidate) {
+    //     return jidNormalizedUser(candidate);
+    //   }
+    // }
+    console.log("chatHandler:chatOrUpdate:", chatOrUpdate);
     let jid = undefined;
     if (chatOrUpdate.remoteJid && chatOrUpdate.remoteJidAlt) {
       if (!chatOrUpdate.remoteJid.includes('s.whatsapp.net') && chatOrUpdate.remoteJidAlt.includes('s.whatsapp.net')) {
