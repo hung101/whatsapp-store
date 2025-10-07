@@ -19,6 +19,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
 
   const resolveRemoteJid = (key: WAMessageKey): string => {
     let jid = undefined;
+    console.log("messageHandler:key:", key);
     if (key.remoteJid && key.remoteJidAlt) {
       if (!key.remoteJid.includes('s.whatsapp.net') && key.remoteJidAlt.includes('s.whatsapp.net')) {
         jid = key.remoteJidAlt;
