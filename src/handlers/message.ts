@@ -18,8 +18,16 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   let listening = false;
 
   const resolveRemoteJid = (key: WAMessageKey): string => {
-    const jidByLid = typeof getJid === 'function' ? getJid(key.id || '') : undefined;
-    return jidNormalizedUser(jidByLid ?? key.remoteJid!);
+    let jid = undefined;
+    if (key.remoteJid && key.remoteJidAlt) {
+      if (!key.remoteJid.includes('s.whatsapp.net') && key.remoteJidAlt.includes('s.whatsapp.net')) {
+        jid = key.remoteJidAlt;
+      }
+      else if (key.remoteJid.includes('s.whatsapp.net')) {
+        jid = key.remoteJid;
+      }
+    }
+    return jidNormalizedUser(jid ?? key.remoteJid!);
   };
 
   // Configurable batch sizes based on environment or dataset size
