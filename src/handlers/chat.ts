@@ -10,7 +10,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
   const logger = useLogger();
   let listening = false;
 
-  const resolveChatId = (id: string | undefined, chatOrUpdate?: any): string => {
+  const resolveChatId = (id: string | null | undefined, chatOrUpdate?: any): string => {
     console.log("chatHandler:chatOrUpdate:", chatOrUpdate);
     // Prefer primary number JID when id is a LID
     if (id?.endsWith('@lid')) {

@@ -285,7 +285,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
             },
             create: {
               ...validatedData,
-              id: data.key.id!,
+              id: key.id!,
               remoteJid: jid,
               sessionId,
             },
