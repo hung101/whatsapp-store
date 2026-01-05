@@ -11,7 +11,7 @@ export default function contactHandler(sessionId: string, event: BaileysEventEmi
   let listening = false;
 
   const resolveContactId = (id: string | undefined, contact?: any): string => {
-    console.log("contactHandler:contact:", contact);
+    // console.log("contactHandler:contact:", contact);
     // Prefer primary number when we get a LID id and contact carries pn/jid
     if (id?.endsWith('@lid')) {
       const candidate = (contact?.senderPn || contact?.pnJid || contact?.jid) as string | undefined;

@@ -19,7 +19,6 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
 
   const resolveRemoteJid = (key: WAMessageKey): string => {
     let jid = undefined;
-    console.log("messageHandler:key:", key);
     if (key.remoteJid && key.remoteJidAlt) {
       if (!key.remoteJid.includes('s.whatsapp.net') && key.remoteJidAlt.includes('s.whatsapp.net')) {
         jid = key.remoteJidAlt;
@@ -29,6 +28,15 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
       }
     }
     return jidNormalizedUser(jid ?? key.remoteJid!);
+  };
+
+  const stringifySafe = (value: unknown): string => {
+    try {
+      return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    } catch (error) {
+      logger.error({ error }, 'Failed to stringify value for logging');
+      return '';
+    }
   };
 
   // Configurable batch sizes based on environment or dataset size
@@ -257,7 +265,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
           const validatedData = validateMessageData(transformedData);
           
           // Additional debug logging for Buffer issues
-          if (JSON.stringify(validatedData).includes('"type":"Buffer"')) {
+          if (stringifySafe(validatedData).includes('"type":"Buffer"')) {
             logger.error({ 
               messageId: key.id,
               issue: 'Buffer objects still present after validation',

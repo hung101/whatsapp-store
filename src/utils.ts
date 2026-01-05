@@ -2,6 +2,150 @@ import { toNumber } from 'baileys';
 import Long from 'long';
 import type { MakeTransformedPrisma, MakeSerializedPrisma } from './types';
 
+type PrismaFieldType = string | undefined;
+type TimestampPreferredType = 'bigint' | 'number' | undefined;
+
+let messageFieldTypesCache: Record<string, PrismaFieldType> | undefined;
+let attemptedMessageFieldTypeResolution = false;
+const TIMESTAMP_FIELD_NAMES = new Set(['messageTimestamp', 'messageC2STimestamp']);
+const TIMESTAMP_TYPE_OVERRIDE = normalizeTimestampOverride(process.env.WHATSAPP_STORE_TIMESTAMP_TYPE);
+let loggedFieldTypeResolutionError = false;
+
+function resolveMessageFieldTypes() {
+  if (attemptedMessageFieldTypeResolution) {
+    return;
+  }
+
+  attemptedMessageFieldTypeResolution = true;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+    const { Prisma } = require('@prisma/client');
+    const models = Prisma?.dmmf?.datamodel?.models;
+
+    if (Array.isArray(models)) {
+      const messageModel = models.find((model: any) => model.name === 'Message');
+
+      if (messageModel?.fields) {
+        messageFieldTypesCache = {};
+        for (const field of messageModel.fields) {
+          messageFieldTypesCache[field.name] = field.type;
+        }
+      }
+    }
+  } catch (error) {
+    messageFieldTypesCache = undefined;
+    if (!loggedFieldTypeResolutionError) {
+      console.warn('[whatsapp-store] Unable to resolve Prisma model metadata, falling back to heuristics.', error);
+      loggedFieldTypeResolutionError = true;
+    }
+  }
+}
+
+function getMessageFieldType(fieldName: string): PrismaFieldType {
+  resolveMessageFieldTypes();
+  return messageFieldTypesCache?.[fieldName];
+}
+
+function normalizeTimestampOverride(value?: string): TimestampPreferredType {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+
+  if (['bigint', 'big-int', 'big', 'int64', 'bigint64', '64'].includes(normalized)) {
+    return 'bigint';
+  }
+
+  if (['int', 'integer', 'number', 'numeric', 'int32', '32'].includes(normalized)) {
+    return 'number';
+  }
+
+  return undefined;
+}
+
+function isTimestampField(fieldName: string): fieldName is 'messageTimestamp' | 'messageC2STimestamp' {
+  return TIMESTAMP_FIELD_NAMES.has(fieldName);
+}
+
+function parseNumericInput(value: unknown): number | bigint | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (typeof value === 'bigint') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    if (/^-?\d+$/.test(trimmed)) {
+      try {
+        return BigInt(trimmed);
+      } catch (error) {
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      }
+    }
+
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function coerceTimestampValue(
+  value: unknown,
+  fieldName: 'messageTimestamp' | 'messageC2STimestamp',
+  preferredType: TimestampPreferredType = undefined
+): number | bigint {
+  const expectedType = getMessageFieldType(fieldName);
+  const targetType: TimestampPreferredType =
+    TIMESTAMP_TYPE_OVERRIDE ||
+    (expectedType === 'BigInt'
+      ? 'bigint'
+      : expectedType === 'Int'
+        ? 'number'
+        : preferredType);
+
+  const numericValue = parseNumericInput(value);
+
+  if (targetType === 'bigint') {
+    if (typeof numericValue === 'bigint') {
+      return numericValue;
+    }
+
+    try {
+      return BigInt(
+        typeof numericValue === 'number' && Number.isFinite(numericValue)
+          ? Math.trunc(numericValue)
+          : 0
+      );
+    } catch (error) {
+      return BigInt(0);
+    }
+  }
+
+  if (numericValue === undefined) {
+    return 0;
+  }
+
+  if (typeof numericValue === 'bigint') {
+    const asNumber = Number(numericValue);
+    return Number.isFinite(asNumber) ? asNumber : 0;
+  }
+
+  return numericValue;
+}
+
 /**
  * Transform object props value into Prisma-supported types
  * Handles complex WhatsApp message structures
@@ -21,6 +165,8 @@ export function transformPrisma<T extends Record<string, any>>(
       obj[key] = Buffer.from(val);
     } else if (typeof val === 'number' || val instanceof Long) {
       obj[key] = toNumber(val);
+    } else if (typeof val === 'string' && isTimestampField(key)) {
+      obj[key] = coerceTimestampValue(val, key);
     } else if (typeof val === 'object' && val !== null && !Buffer.isBuffer(val)) {
       // Handle serialized Buffer objects (e.g., {type: "Buffer", data: [...]})
       if ((val as any).type === 'Buffer' && Array.isArray((val as any).data)) {
@@ -89,7 +235,7 @@ function cleanObjectForPrisma(obj: any, parentKey?: string): any {
         .sort((a, b) => a[0] - b[0]);
       const bytes = Uint8Array.from(entries.map(([, v]) => v));
       const b64 = Buffer.from(bytes).toString('base64');
-      console.error('[cleanObjectForPrisma] Converted numeric-keyed byte object to base64', { length: bytes.length, parentKey });
+      // console.error('[cleanObjectForPrisma] Converted numeric-keyed byte object to base64', { length: bytes.length, parentKey });
       return b64;
     } catch (e) {
       console.error('[cleanObjectForPrisma] Failed to convert numeric-keyed byte object', e);
@@ -198,6 +344,10 @@ function normalizeBigIntDeep(input: any): any {
 export function validateMessageData(data: any): any {
   // First, deeply clean the entire data object to handle all nested Buffers and Long objects
   const cleanedData = cleanObjectForPrisma(data);
+  const timestampTypeHints: Record<string, TimestampPreferredType> = {
+    messageTimestamp: typeof cleanedData?.messageTimestamp === 'bigint' ? 'bigint' : undefined,
+    messageC2STimestamp: typeof cleanedData?.messageC2STimestamp === 'bigint' ? 'bigint' : undefined,
+  };
   // Normalize BigInt early to avoid JSON.stringify errors in diagnostics below
   let validated = normalizeBigIntDeep({ ...cleanedData });
   
@@ -229,8 +379,6 @@ export function validateMessageData(data: any): any {
   
   // List of fields that exist in the Prisma Message schema
   const validFields = [
-    // Prisma internal fields
-    'pkId',
     // Schema fields
     'sessionId', 'remoteJid', 'id', 'agentId', 'bizPrivacyStatus', 'broadcast',
     'clearMedia', 'duration', 'ephemeralDuration', 'ephemeralOffToOn', 'ephemeralOutOfSync',
@@ -265,25 +413,19 @@ export function validateMessageData(data: any): any {
   
   // Ensure timestamp fields are numbers (avoid BigInt to prevent JSON/logging issues and match Prisma Int clients)
   if (validated.messageTimestamp !== undefined) {
-    if (typeof validated.messageTimestamp === 'string') {
-      const numVal = parseInt(validated.messageTimestamp, 10);
-      validated.messageTimestamp = isNaN(numVal) ? 0 : numVal;
-    } else if (typeof validated.messageTimestamp === 'bigint') {
-      validated.messageTimestamp = Number(validated.messageTimestamp);
-    } else if (typeof validated.messageTimestamp !== 'number') {
-      validated.messageTimestamp = 0;
-    }
+    validated.messageTimestamp = coerceTimestampValue(
+      validated.messageTimestamp,
+      'messageTimestamp',
+      timestampTypeHints.messageTimestamp
+    );
   }
 
   if (validated.messageC2STimestamp !== undefined) {
-    if (typeof validated.messageC2STimestamp === 'string') {
-      const numVal = parseInt(validated.messageC2STimestamp, 10);
-      validated.messageC2STimestamp = isNaN(numVal) ? 0 : numVal;
-    } else if (typeof validated.messageC2STimestamp === 'bigint') {
-      validated.messageC2STimestamp = Number(validated.messageC2STimestamp);
-    } else if (typeof validated.messageC2STimestamp !== 'number') {
-      validated.messageC2STimestamp = 0;
-    }
+    validated.messageC2STimestamp = coerceTimestampValue(
+      validated.messageC2STimestamp,
+      'messageC2STimestamp',
+      timestampTypeHints.messageC2STimestamp
+    );
   }
   
   // Ensure messageSecret is a Buffer (fallback for any missed cases)

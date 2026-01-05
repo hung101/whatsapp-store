@@ -1,7 +1,6 @@
 import type { AuthenticationCreds, SignalDataTypeMap } from 'baileys';
 import { proto } from 'baileys';
 import { BufferJSON, initAuthCreds } from 'baileys';
-import { Prisma } from '.prisma/client';
 import { useLogger, usePrisma } from './shared';
 
 const fixId = (id: string) => id.replace(/\//g, '__').replace(/:/g, '-');
@@ -9,6 +8,40 @@ const fixId = (id: string) => id.replace(/\//g, '__').replace(/:/g, '-');
 export async function useSession(sessionId: string) {
   const model = usePrisma().session;
   const logger = useLogger();
+
+  const persistSessionRecord = async (jsonData: string, id: string) => {
+    const where = { sessionId, id };
+    const createPayload = { data: jsonData, id, sessionId };
+    const updatePayload = { data: jsonData };
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const updateResult = await model.updateMany({
+          data: updatePayload,
+          where,
+        });
+        if (updateResult.count > 0) {
+          return;
+        }
+
+        await model.create({
+          select: { pkId: true },
+          data: createPayload,
+        });
+        return;
+      } catch (err: any) {
+        if (err?.code === 'P2002') {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    logger.error(
+      { id, sessionId },
+      'Failed to persist session record after repeated retries'
+    );
+  };
 
   const write = async (data: any, id: string) => {
     try {
@@ -25,12 +58,7 @@ export async function useSession(sessionId: string) {
       }
       
       id = fixId(id);
-      await model.upsert({
-        select: { pkId: true },
-        create: { data: jsonData, id, sessionId },
-        update: { data: jsonData },
-        where: { sessionId_id: { id, sessionId } },
-      });
+      await persistSessionRecord(jsonData, id);
     } catch (e) {
       logger.error(e, 'An error occured during session write');
     }
@@ -76,8 +104,9 @@ export async function useSession(sessionId: string) {
         where: { sessionId_id: { id: fixId(id), sessionId } },
       });
     } catch (e) {
+      const code = (e as any)?.code;
       // P2025: Record to delete does not exist - this is expected behavior
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      if (code === 'P2025') {
         logger.debug({ id, sessionId }, 'Session record already deleted or does not exist');
         return;
       }

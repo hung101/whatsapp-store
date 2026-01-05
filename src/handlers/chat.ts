@@ -11,7 +11,7 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
   let listening = false;
 
   const resolveChatId = (id: string | null | undefined, chatOrUpdate?: any): string => {
-    console.log("chatHandler:chatOrUpdate:", chatOrUpdate);
+    // console.log("chatHandler:chatOrUpdate:", chatOrUpdate);
     // Prefer primary number JID when id is a LID
     if (id?.endsWith('@lid')) {
       const candidate: string | undefined = chatOrUpdate?.pnJid || chatOrUpdate?.senderPn || chatOrUpdate?.jid;
@@ -21,6 +21,48 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
     }
     const jidByLid = typeof getJid === 'function' ? getJid(id || '') : undefined;
     return jidNormalizedUser(jidByLid ?? id!);
+  };
+
+  const persistChatRecord = async ({
+    id,
+    createData,
+    updateData,
+  }: {
+    id: string;
+    createData: Record<string, any>;
+    updateData: Record<string, any>;
+  }) => {
+    const where = { sessionId, id };
+    const createPayload = { ...createData, id, sessionId };
+    const updatePayload = { ...updateData };
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const updateResult = await prisma.chat.updateMany({
+          data: updatePayload,
+          where,
+        });
+        if (updateResult.count > 0) {
+          return;
+        }
+
+        await prisma.chat.create({
+          select: { pkId: true },
+          data: createPayload,
+        });
+        return;
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    logger.error(
+      { id, sessionId },
+      'Failed to persist chat record after repeated retries'
+    );
   };
 
   const set: BaileysEventHandler<'messaging-history.set'> = async ({ chats, isLatest }) => {
@@ -76,38 +118,14 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
 
       const normalizedChats = Array.from(dedupedById.values());
 
-      // Robust per-item upsert with fallback to handle rare race conditions (P2002)
       await Promise.all(
-        normalizedChats.map(async (data) => {
-          try {
-            await prisma.chat.upsert({
-              select: { pkId: true },
-              create: { ...data, sessionId },
-              update: { ...data, id: undefined },
-              where: { sessionId_id: { id: data.id, sessionId } },
-            });
-          } catch (e: any) {
-            if (e?.code === 'P2002') {
-              // Unique constraint hit due to concurrent create elsewhere: fall back to update
-              try {
-                await prisma.chat.update({
-                  select: { pkId: true },
-                  data: { ...data, id: undefined },
-                  where: { sessionId_id: { id: data.id, sessionId } },
-                });
-              } catch (e2: any) {
-                if (e2?.code === 'P2025') {
-                  // Record missing when updating -> create instead
-                  await prisma.chat.create({ select: { pkId: true }, data: { ...data, sessionId } });
-                } else {
-                  throw e2;
-                }
-              }
-            } else {
-              throw e;
-            }
-          }
-        })
+        normalizedChats.map((data) =>
+          persistChatRecord({
+            id: data.id,
+            createData: { ...data },
+            updateData: { ...data, id: undefined },
+          })
+        )
       );
     } catch (e) {
       logger.error(e, 'An error occured during chats upsert');
@@ -126,14 +144,10 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
         const transformedData = transformPrisma(update);
         const validatedData = validateChatData(transformedData);
         
-        await prisma.chat.upsert({
-          select: { pkId: true },
-          create: { 
-            ...validatedData,
-            id: chatId,
-            sessionId 
-          },
-          update: {
+        await persistChatRecord({
+          id: chatId,
+          createData: { ...validatedData, id: chatId },
+          updateData: {
             ...validatedData,
             id: undefined,
             unreadCount:
@@ -143,7 +157,6 @@ export default function chatHandler(sessionId: string, event: BaileysEventEmitte
                   : { set: validatedData.unreadCount }
                 : undefined,
           },
-          where: { sessionId_id: { id: chatId, sessionId } },
         });
       } catch (e) {
         logger.error(e, 'An error occured during chat update');
