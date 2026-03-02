@@ -12,13 +12,145 @@ import { transformPrisma, validateMessageData, retryDatabaseOperation } from '..
 const getKeyAuthor = (key: WAMessageKey | undefined | null) =>
   (key?.fromMe ? 'me' : key?.participant || key?.remoteJid) || '';
 
+/**
+ * Checks if a message is a stub message with no actual content.
+ * Stub messages are system notifications (e.g., E2E encryption notices, message deletions)
+ * that have a messageStubType but no message body.
+ * These don't contain useful chat content and should be skipped.
+ */
+const isEmptyStubMessage = (message: proto.IWebMessageInfo): boolean => {
+  return message.messageStubType != null && message.messageStubType !== 0 && !message.message;
+};
+
+/**
+ * Checks if a message is a protocol message that should not be stored.
+ * Protocol messages are internal WhatsApp signaling (e.g., history sync notifications,
+ * app state sync key shares, ephemeral settings) and not actual user chat content.
+ */
+const isProtocolMessage = (message: proto.IWebMessageInfo): boolean => {
+  return !!message.message?.protocolMessage;
+};
+
+/**
+ * Extracts a phone number from messageStubParameters and converts it to a JID.
+ * messageStubParameters often contains phone numbers like ["+62 851-8316-4359"]
+ */
+const extractPhoneFromStubParams = (stubParams: string[] | null | undefined): string | undefined => {
+  if (!stubParams || !Array.isArray(stubParams) || stubParams.length === 0) {
+    return undefined;
+  }
+  
+  // Look for a phone number pattern in the parameters
+  for (const param of stubParams) {
+    if (typeof param !== 'string') continue;
+    
+    // Remove all non-digit characters except leading +
+    const cleaned = param.replace(/[^\d+]/g, '');
+    // Remove leading + if present
+    const digits = cleaned.replace(/^\+/, '');
+    
+    // Check if it looks like a phone number (at least 8 digits)
+    if (digits.length >= 8 && /^\d+$/.test(digits)) {
+      return `${digits}@s.whatsapp.net`;
+    }
+  }
+  
+  return undefined;
+};
+
 export default function messageHandler(sessionId: string, event: BaileysEventEmitter, getJid: Function | undefined = undefined) {
   const prisma = usePrisma();
   const logger = useLogger();
   let listening = false;
 
-  const resolveRemoteJid = (key: WAMessageKey): string => {
+  /**
+   * Upserts a Contact record from message data.
+   * This ensures contacts are created with the correct phone number at message time.
+   * Only uses contact info from incoming messages (fromMe = false) since pushName
+   * is the sender's name, not the recipient's.
+   */
+  const upsertContactFromMessage = async (jid: string, message: proto.IWebMessageInfo) => {
+    // Skip if sessionId or jid is empty
+    if (!sessionId || sessionId.trim() === '' || !jid || jid.trim() === '') {
+      return;
+    }
+    
+    // Skip group chats and status broadcasts
+    if (jid.includes('@g.us') || jid.includes('@broadcast') || jid === 'status@broadcast') {
+      return;
+    }
+    
+    // Only use contact info from incoming messages (fromMe = false)
+    // pushName is the SENDER's name, so for outgoing messages it's OUR name, not the contact's
+    if (message.key?.fromMe) {
+      return;
+    }
+    
+    // Extract contact info from message
+    const pushName = message.pushName;
+    const verifiedBizName = message.verifiedBizName;
+    
+    // Only upsert if we have some contact info
+    if (!pushName && !verifiedBizName) {
+      return;
+    }
+    
+    try {
+      await prisma.contact.upsert({
+        select: { pkId: true },
+        where: { sessionId_id: { sessionId, id: jid } },
+        create: {
+          sessionId,
+          id: jid,
+          notify: pushName || null,
+          verifiedName: verifiedBizName || null,
+        },
+        update: {
+          // Only update if we have new values
+          ...(pushName ? { notify: pushName } : {}),
+          ...(verifiedBizName ? { verifiedName: verifiedBizName } : {}),
+        },
+      });
+    } catch (e) {
+      // Silently ignore errors - this is a best-effort operation
+      logger.debug({ jid, error: e }, 'Failed to upsert contact from message');
+    }
+  };
+
+  /**
+   * Batch lookup LID -> phone number mappings from the Chat table.
+   * Returns a Map of lidJid -> resolvedPhoneJid
+   */
+  const batchLookupLidMappings = async (lids: string[]): Promise<Map<string, string>> => {
+    const mappings = new Map<string, string>();
+    if (lids.length === 0) return mappings;
+    
+    try {
+      const chatsWithLids = await prisma.chat.findMany({
+        select: { id: true, lidJid: true },
+        where: {
+          sessionId,
+          lidJid: { in: lids },
+          id: { endsWith: '@s.whatsapp.net' }
+        }
+      });
+      
+      for (const chat of chatsWithLids) {
+        if (chat.lidJid && chat.id) {
+          mappings.set(chat.lidJid, chat.id);
+        }
+      }
+    } catch (e) {
+      logger.debug({ error: e }, 'Failed to batch lookup LID mappings from Chat table');
+    }
+    
+    return mappings;
+  };
+
+  const resolveRemoteJid = (key: WAMessageKey, message?: proto.IWebMessageInfo, lidMappingCache?: Map<string, string>): string => {
     let jid = undefined;
+    
+    // First, try to use remoteJidAlt if available
     if (key.remoteJid && key.remoteJidAlt) {
       if (!key.remoteJid.includes('s.whatsapp.net') && key.remoteJidAlt.includes('s.whatsapp.net')) {
         jid = key.remoteJidAlt;
@@ -27,6 +159,31 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
         jid = key.remoteJid;
       }
     }
+    
+    // If still no resolved jid, try getJid function (uses Baileys lidMapping)
+    if (!jid && key.remoteJid?.endsWith('@lid') && typeof getJid === 'function') {
+      const resolved = getJid(key.remoteJid);
+      if (resolved && resolved.includes('@s.whatsapp.net')) {
+        jid = resolved;
+      }
+    }
+    
+    // If still no resolved jid, try extracting phone from messageStubParameters
+    if (!jid && key.remoteJid?.endsWith('@lid') && message?.messageStubParameters) {
+      const phoneJid = extractPhoneFromStubParams(message.messageStubParameters as string[]);
+      if (phoneJid) {
+        jid = phoneJid;
+      }
+    }
+    
+    // If still no resolved jid, try the pre-fetched LID mapping cache from Chat table
+    if (!jid && key.remoteJid?.endsWith('@lid') && lidMappingCache) {
+      const cachedJid = lidMappingCache.get(key.remoteJid);
+      if (cachedJid && cachedJid.includes('@s.whatsapp.net')) {
+        jid = cachedJid;
+      }
+    }
+    
     return jidNormalizedUser(jid ?? key.remoteJid!);
   };
 
@@ -78,6 +235,18 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
       
       const { BATCH_SIZE, MAX_CONCURRENT_BATCHES, TIMEOUT } = getBatchConfig(messages.length);
       
+      // Collect all unique LIDs from messages for batch lookup
+      const uniqueLids = new Set<string>();
+      for (const message of messages) {
+        if (message.key?.remoteJid?.endsWith('@lid')) {
+          uniqueLids.add(message.key.remoteJid);
+        }
+      }
+      
+      // Batch lookup LID -> phone number mappings from Chat table
+      const lidMappingCache = await batchLookupLidMappings(Array.from(uniqueLids));
+      logger.info({ uniqueLids: uniqueLids.size, foundMappings: lidMappingCache.size }, 'LID mapping cache loaded');
+      
       const batches = [];
       for (let i = 0; i < messages.length; i += BATCH_SIZE) {
         batches.push(messages.slice(i, i + BATCH_SIZE));
@@ -99,7 +268,26 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
                 const messagesToUpdate = [];
 
                 for (const message of batch) {
-                  const jid = resolveRemoteJid(message.key);
+                  // Skip stub messages (system notifications) with no actual content
+                  if (isEmptyStubMessage(message)) {
+                    logger.debug({
+                      remoteJid: message.key?.remoteJid,
+                      messageStubType: message.messageStubType,
+                    }, 'Skipping stub message with no content');
+                    continue;
+                  }
+
+                  // Skip protocol messages (internal WhatsApp signaling, e.g. history sync notifications)
+                  if (isProtocolMessage(message)) {
+                    logger.debug({
+                      remoteJid: message.key?.remoteJid,
+                      protocolType: message.message?.protocolMessage?.type,
+                    }, 'Skipping protocol message');
+                    continue;
+                  }
+
+                  const jid = resolveRemoteJid(message.key, message, lidMappingCache);
+                  
                   const transformedMessage = {
                     ...transformPrisma(message),
                     remoteJid: jid,
@@ -196,12 +384,43 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   };
 
   const upsert: BaileysEventHandler<'messages.upsert'> = async ({ messages, type }) => {
+    // Collect all unique LIDs for batch lookup
+    const uniqueLids = new Set<string>();
+    for (const message of messages) {
+      if (message.key?.remoteJid?.endsWith('@lid')) {
+        uniqueLids.add(message.key.remoteJid);
+      }
+    }
+    
+    // Batch lookup LID -> phone number mappings from Chat table
+    const lidMappingCache = uniqueLids.size > 0 
+      ? await batchLookupLidMappings(Array.from(uniqueLids))
+      : new Map<string, string>();
+    
     switch (type) {
       case 'append':
       case 'notify':
         for (const message of messages) {
           try {
-            const jid = resolveRemoteJid(message.key);
+            // Skip stub messages (system notifications) with no actual content
+            if (isEmptyStubMessage(message)) {
+              logger.debug({
+                remoteJid: message.key?.remoteJid,
+                messageStubType: message.messageStubType,
+              }, 'Skipping stub message with no content (upsert)');
+              continue;
+            }
+
+            // Skip protocol messages (internal WhatsApp signaling, e.g. history sync notifications)
+            if (isProtocolMessage(message)) {
+              logger.debug({
+                remoteJid: message.key?.remoteJid,
+                protocolType: message.message?.protocolMessage?.type,
+              }, 'Skipping protocol message (upsert)');
+              continue;
+            }
+
+            const jid = resolveRemoteJid(message.key, message, lidMappingCache);
             const data = transformPrisma(message);
             
             // Validate data before upsert
@@ -227,6 +446,9 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
               logger
             );
 
+            // Upsert Contact record from message data (with resolved phone number)
+            await upsertContactFromMessage(jid, message);
+
             const chatExists = (await prisma.chat.count({ where: { id: jid, sessionId } })) > 0;
             if (type === 'notify' && !chatExists) {
               event.emit('chats.upsert', [
@@ -248,7 +470,7 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
   const update: BaileysEventHandler<'messages.update'> = async (updates) => {
     for (const { update, key } of updates) {
       try {
-        const jid = resolveRemoteJid(key);
+        const jid = resolveRemoteJid(key, update as proto.IWebMessageInfo);
         await retryDatabaseOperation(
           () => prisma.$transaction(async (tx) => {
           const prevData = await tx.message.findFirst({
