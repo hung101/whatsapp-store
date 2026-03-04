@@ -1,19 +1,59 @@
 diff --git a/node_modules/baileys/lib/Socket/messages-recv.js b/node_modules/baileys/lib/Socket/messages-recv.js
-index f2e2e10..47e1dfd 100644
+index f2e2e10..9bbe777 100644
 --- a/node_modules/baileys/lib/Socket/messages-recv.js
 +++ b/node_modules/baileys/lib/Socket/messages-recv.js
-@@ -988,8 +988,26 @@ export const makeMessagesRecvSocket = (config) => {
+@@ -51,19 +51,21 @@ export const makeMessagesRecvSocket = (config) => {
+         return sendPeerDataOperationMessage(pdoMessage);
+     };
+     const requestPlaceholderResend = async (messageKey) => {
++        const sessionJid = authState.creds.me?.id || 'unknown';
+         if (!authState.creds.me?.id) {
+             throw new Boom('Not authenticated');
+         }
+         if (placeholderResendCache.get(messageKey?.id)) {
+-            logger.debug({ messageKey }, 'already requested resend');
++            logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Placeholder resend already requested (dedup), skipping');
+             return;
+         }
+         else {
+             await placeholderResendCache.set(messageKey?.id, true);
+         }
++        logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Waiting 5s before sending PDO request');
+         await delay(5000);
+         if (!placeholderResendCache.get(messageKey?.id)) {
+-            logger.debug({ messageKey }, 'message received while resend requested');
++            logger.error({ session: sessionJid, msgId: messageKey?.id }, 'CTWA_TRACE: Message arrived during 5s wait, no PDO needed');
+             return 'RESOLVED';
+         }
+         const pdoMessage = {
+@@ -76,9 +78,12 @@ export const makeMessagesRecvSocket = (config) => {
+         };
+         setTimeout(async () => {
+             if (placeholderResendCache.get(messageKey?.id)) {
+-                logger.debug({ messageKey }, 'PDO message without response after 15 seconds. Phone possibly offline');
++                logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA: PDO no response after 15s - phone possibly offline, message LOST');
+                 await placeholderResendCache.del(messageKey?.id);
+             }
++            else {
++                logger.error({ session: sessionJid, msgId: messageKey?.id }, 'CTWA_TRACE: PDO response received within 15s');
++            }
+         }, 15000);
+         return sendPeerDataOperationMessage(pdoMessage);
+     };
+@@ -988,8 +993,31 @@ export const makeMessagesRecvSocket = (config) => {
                  await decrypt();
                  // message failed to decrypt
                  if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT && msg.category !== 'peer') {
 -                    if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT ||
 -                        msg.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT) {
-+                    if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT) {
++                    const sessionJid = authState.creds.me?.id || 'unknown';
++                    const stubParam = msg?.messageStubParameters?.[0] || '';
++                    logger.error({ session: sessionJid, msgId: msg.key?.id, remoteJid: msg.key?.remoteJid, fromMe: msg.key?.fromMe, stubParam, category }, 'CTWA_TRACE: CIPHERTEXT stub received');
++                    if (stubParam === MISSING_KEYS_ERROR_TEXT) {
 +                        return sendMessageAck(node);
 +                    }
-+                    if (msg.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT) {
++                    if (stubParam === NO_MESSAGE_FOUND_ERROR_TEXT) {
 +                        if (msg.key) {
-+                            const sessionJid = authState.creds.me?.id || 'unknown';
 +                            logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid, fromMe: msg.key.fromMe }, 'CTWA: Message absent from node detected, requesting placeholder resend from phone');
 +                            requestPlaceholderResend(msg.key)
 +                                .then((result) => {
@@ -22,6 +62,9 @@ index f2e2e10..47e1dfd 100644
 +                                    }
 +                                    else if (result) {
 +                                        logger.error({ session: sessionJid, msgId: msg.key.id, requestId: result }, 'CTWA: Placeholder resend PDO request sent');
++                                    }
++                                    else {
++                                        logger.error({ session: sessionJid, msgId: msg.key.id }, 'CTWA: Placeholder resend skipped (already requested or dedup)');
 +                                    }
 +                                })
 +                                .catch((error) => {
