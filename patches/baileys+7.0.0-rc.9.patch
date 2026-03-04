@@ -1,5 +1,5 @@
 diff --git a/node_modules/baileys/lib/Socket/messages-recv.js b/node_modules/baileys/lib/Socket/messages-recv.js
-index f2e2e10..9bbe777 100644
+index f2e2e10..2fbf678 100644
 --- a/node_modules/baileys/lib/Socket/messages-recv.js
 +++ b/node_modules/baileys/lib/Socket/messages-recv.js
 @@ -51,19 +51,21 @@ export const makeMessagesRecvSocket = (config) => {
@@ -22,7 +22,7 @@ index f2e2e10..9bbe777 100644
          await delay(5000);
          if (!placeholderResendCache.get(messageKey?.id)) {
 -            logger.debug({ messageKey }, 'message received while resend requested');
-+            logger.error({ session: sessionJid, msgId: messageKey?.id }, 'CTWA_TRACE: Message arrived during 5s wait, no PDO needed');
++            logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Message arrived during 5s wait, no PDO needed');
              return 'RESOLVED';
          }
          const pdoMessage = {
@@ -35,7 +35,7 @@ index f2e2e10..9bbe777 100644
                  await placeholderResendCache.del(messageKey?.id);
              }
 +            else {
-+                logger.error({ session: sessionJid, msgId: messageKey?.id }, 'CTWA_TRACE: PDO response received within 15s');
++                logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: PDO response received within 15s');
 +            }
          }, 15000);
          return sendPeerDataOperationMessage(pdoMessage);
@@ -58,13 +58,13 @@ index f2e2e10..9bbe777 100644
 +                            requestPlaceholderResend(msg.key)
 +                                .then((result) => {
 +                                    if (result === 'RESOLVED') {
-+                                        logger.error({ session: sessionJid, msgId: msg.key.id }, 'CTWA: Message received during resend delay');
++                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid }, 'CTWA: Message received during resend delay');
 +                                    }
 +                                    else if (result) {
-+                                        logger.error({ session: sessionJid, msgId: msg.key.id, requestId: result }, 'CTWA: Placeholder resend PDO request sent');
++                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid, requestId: result }, 'CTWA: Placeholder resend PDO request sent');
 +                                    }
 +                                    else {
-+                                        logger.error({ session: sessionJid, msgId: msg.key.id }, 'CTWA: Placeholder resend skipped (already requested or dedup)');
++                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid }, 'CTWA: Placeholder resend skipped (already requested or dedup)');
 +                                    }
 +                                })
 +                                .catch((error) => {
