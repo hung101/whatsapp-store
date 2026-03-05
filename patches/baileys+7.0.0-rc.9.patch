@@ -1,11 +1,13 @@
 diff --git a/node_modules/baileys/lib/Socket/messages-recv.js b/node_modules/baileys/lib/Socket/messages-recv.js
-index f2e2e10..476c2dc 100644
+index f2e2e10..1535b62 100644
 --- a/node_modules/baileys/lib/Socket/messages-recv.js
 +++ b/node_modules/baileys/lib/Socket/messages-recv.js
-@@ -51,19 +51,21 @@ export const makeMessagesRecvSocket = (config) => {
+@@ -50,20 +50,24 @@ export const makeMessagesRecvSocket = (config) => {
+         };
          return sendPeerDataOperationMessage(pdoMessage);
      };
-     const requestPlaceholderResend = async (messageKey) => {
+-    const requestPlaceholderResend = async (messageKey) => {
++    const requestPlaceholderResend = async (messageKey, msgData) => {
 +        const sessionJid = authState.creds.me?.id || 'unknown';
          if (!authState.creds.me?.id) {
              throw new Boom('Not authenticated');
@@ -16,17 +18,21 @@ index f2e2e10..476c2dc 100644
              return;
          }
          else {
-             await placeholderResendCache.set(messageKey?.id, true);
+-            await placeholderResendCache.set(messageKey?.id, true);
++            // Store original message data so PDO response handler can preserve
++            // metadata (LID details, timestamps, pushName, etc.) that the phone may omit
++            await placeholderResendCache.set(messageKey?.id, msgData || true);
          }
-+        logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Waiting 5s before sending PDO request');
-         await delay(5000);
+-        await delay(5000);
++        logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Waiting 2s before sending PDO request');
++        await delay(2000);
          if (!placeholderResendCache.get(messageKey?.id)) {
 -            logger.debug({ messageKey }, 'message received while resend requested');
 +            logger.error({ session: sessionJid, msgId: messageKey?.id, remoteJid: messageKey?.remoteJid }, 'CTWA_TRACE: Message arrived during 5s wait, no PDO needed');
              return 'RESOLVED';
          }
          const pdoMessage = {
-@@ -74,13 +76,51 @@ export const makeMessagesRecvSocket = (config) => {
+@@ -74,13 +78,51 @@ export const makeMessagesRecvSocket = (config) => {
              ],
              peerDataOperationRequestType: proto.Message.PeerDataOperationRequestType.PLACEHOLDER_MESSAGE_RESEND
          };
@@ -85,13 +91,14 @@ index f2e2e10..476c2dc 100644
      };
      // Handles mex newsletter notifications
      const handleMexNewsletterNotification = async (node) => {
-@@ -987,53 +1027,85 @@ export const makeMessagesRecvSocket = (config) => {
+@@ -987,53 +1029,125 @@ export const makeMessagesRecvSocket = (config) => {
              await processingMutex.mutex(async () => {
                  await decrypt();
                  // message failed to decrypt
 -                if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT && msg.category !== 'peer') {
 -                    if (msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT ||
 -                        msg.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT) {
+-                        return sendMessageAck(node);
 +                if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
 +                    const sessionJid = authState.creds.me?.id || 'unknown';
 +                    const stubParam = msg?.messageStubParameters?.[0] || '';
@@ -102,15 +109,53 @@ index f2e2e10..476c2dc 100644
 +                    // regardless of message category, because CTWA messages may arrive with any
 +                    // category value including 'peer'.
 +                    if (stubParam === NO_MESSAGE_FOUND_ERROR_TEXT) {
++                        // Filter out unavailable types that shouldn't trigger PDO (from official fix)
++                        const unavailableNode = getBinaryNodeChild(node, 'unavailable');
++                        const unavailableType = unavailableNode?.attrs?.type;
++                        if (
++                            unavailableType === 'bot_unavailable_fanout' ||
++                            unavailableType === 'hosted_unavailable_fanout' ||
++                            unavailableType === 'view_once_unavailable_fanout'
++                        ) {
++                            logger.error({ session: sessionJid, msgId: msg.key?.id, unavailableType }, 'CTWA_TRACE: Skipping placeholder resend for excluded unavailable type');
++                            return sendMessageAck(node);
++                        }
++                        // Skip PDO for messages older than 14 days (WA Web enforces this limit)
++                        const PLACEHOLDER_MAX_AGE_SECONDS = 14 * 24 * 60 * 60;
++                        const messageAge = unixTimestampSeconds() - (typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp : Number(msg.messageTimestamp || 0));
++                        if (messageAge > PLACEHOLDER_MAX_AGE_SECONDS) {
++                            logger.error({ session: sessionJid, msgId: msg.key?.id, messageAge }, 'CTWA_TRACE: Skipping placeholder resend for old message (>14 days)');
++                            return sendMessageAck(node);
++                        }
 +                        if (msg.key) {
 +                            logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid, fromMe: msg.key.fromMe, category, msgCategory: msg.category }, 'CTWA: Message absent from node detected, requesting placeholder resend from phone');
-+                            requestPlaceholderResend(msg.key)
++                            // Build clean key and cache original metadata (from official fix)
++                            // so PDO response handler can preserve LID details, timestamps, etc.
++                            const cleanKey = {
++                                remoteJid: msg.key.remoteJid,
++                                fromMe: msg.key.fromMe,
++                                id: msg.key.id,
++                                participant: msg.key.participant
++                            };
++                            const msgData = {
++                                key: msg.key,
++                                messageTimestamp: msg.messageTimestamp,
++                                pushName: msg.pushName,
++                                participant: msg.participant,
++                                verifiedBizName: msg.verifiedBizName
++                            };
++                            requestPlaceholderResend(cleanKey, msgData)
 +                                .then((result) => {
 +                                    if (result === 'RESOLVED') {
 +                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid }, 'CTWA: Message received during resend delay');
 +                                    }
 +                                    else if (result) {
 +                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid, requestId: result }, 'CTWA: Placeholder resend PDO request sent');
++                                        // Store requestId in stubParameters for correlation (from official fix)
++                                        ev.emit('messages.update', [{
++                                            key: msg.key,
++                                            update: { messageStubParameters: [NO_MESSAGE_FOUND_ERROR_TEXT, result] }
++                                        }]);
 +                                    }
 +                                    else {
 +                                        logger.error({ session: sessionJid, msgId: msg.key.id, remoteJid: msg.key.remoteJid }, 'CTWA: Placeholder resend skipped (already requested or dedup)');
@@ -120,7 +165,9 @@ index f2e2e10..476c2dc 100644
 +                                    logger.error({ session: sessionJid, error, msgId: msg.key.id }, 'CTWA: Failed to request placeholder resend');
 +                                });
 +                        }
-                         return sendMessageAck(node);
++                        // ACK but DON'T return — fall through to upsertMessage so the
++                        // CIPHERTEXT stub is emitted as a placeholder (from official fix)
++                        await sendMessageAck(node);
                      }
 -                    const errorMessage = msg?.messageStubParameters?.[0] || '';
 -                    const isPreKeyError = errorMessage.includes('PreKey');
@@ -152,7 +199,7 @@ index f2e2e10..476c2dc 100644
 -                            }
 +                    // For all other CIPHERTEXT errors, apply the category gate
 +                    // (peer category messages use a different retry mechanism)
-+                    if (msg.category !== 'peer') {
++                    else if (msg.category !== 'peer') {
 +                        if (stubParam === MISSING_KEYS_ERROR_TEXT) {
 +                            return sendMessageAck(node);
                          }
@@ -211,46 +258,74 @@ index f2e2e10..476c2dc 100644
                  else {
                      const isNewsletter = isJidNewsletter(msg.key.remoteJid);
 diff --git a/node_modules/baileys/lib/Utils/process-message.js b/node_modules/baileys/lib/Utils/process-message.js
-index 7927483..76913a2 100644
+index 7927483..7111219 100644
 --- a/node_modules/baileys/lib/Utils/process-message.js
 +++ b/node_modules/baileys/lib/Utils/process-message.js
-@@ -215,7 +215,19 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+@@ -215,23 +215,99 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
              case proto.Message.ProtocolMessage.Type.PEER_DATA_OPERATION_REQUEST_RESPONSE_MESSAGE:
                  const response = protocolMsg.peerDataOperationRequestResponseMessage;
                  if (response) {
 -                    await placeholderResendCache?.del(response.stanzaId);
-+                    // Fix cache key mismatch: response.stanzaId is the PDO request stanza ID,
-+                    // but the cache stores entries by original messageKey.id.
-+                    // Look up the original message ID from the pdo_ mapping, then delete both.
-+                    const originalMsgId = placeholderResendCache?.get(`pdo_${response.stanzaId}`);
-+                    if (originalMsgId) {
-+                        await placeholderResendCache?.del(originalMsgId);
-+                        await placeholderResendCache?.del(`pdo_${response.stanzaId}`);
-+                        logger.error({ session: meId, stanzaId: response.stanzaId, originalMsgId }, 'CTWA_TRACE: Cleared cache for PDO response (mapped key)');
-+                    }
-+                    else {
-+                        // Fallback: try deleting by stanzaId directly (original behavior)
-+                        await placeholderResendCache?.del(response.stanzaId);
-+                    }
                      // TODO: IMPLEMENT HISTORY SYNC ETC (sticker uploads etc.).
-                     const { peerDataOperationResult } = response;
+-                    const { peerDataOperationResult } = response;
++                    const peerDataOperationResult = response.peerDataOperationResult || [];
                      for (const result of peerDataOperationResult) {
-@@ -223,8 +235,54 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+-                        const { placeholderMessageResendResponse: retryResponse } = result;
++                        const retryResponse = result?.placeholderMessageResendResponse;
                          //eslint-disable-next-line max-depth
-                         if (retryResponse) {
+-                        if (retryResponse) {
++                        if (!retryResponse?.webMessageInfoBytes) {
++                            continue;
++                        }
++                        //eslint-disable-next-line max-depth
++                        try {
                              const webMessageInfo = proto.WebMessageInfo.decode(retryResponse.webMessageInfoBytes);
 -                            // wait till another upsert event is available, don't want it to be part of the PDO response message
 -                            // TODO: parse through proper message handling utilities (to add relevant key fields)
-+                            if (webMessageInfo.key?.remoteJid) {
-+                                const rawJid = webMessageInfo.key.remoteJid;
+-                            setTimeout(() => {
+-                                ev.emit('messages.upsert', {
+-                                    messages: [webMessageInfo],
+-                                    type: 'notify',
+-                                    requestId: response.stanzaId
+-                                });
+-                            }, 500);
++                            const msgId = webMessageInfo.key?.id;
++                            // Retrieve cached original message data (from official fix)
++                            // Preserves LID details, timestamps, pushName, etc. that the phone may omit
++                            const cachedData = msgId ? placeholderResendCache?.get(msgId) : undefined;
++                            //eslint-disable-next-line max-depth
++                            if (msgId) {
++                                await placeholderResendCache?.del(msgId);
++                                // Also clean up pdo_ mapping entries
++                                await placeholderResendCache?.del(`pdo_${response.stanzaId}`);
++                                logger.error({ session: meId, stanzaId: response.stanzaId, msgId }, 'CTWA_TRACE: Cleared cache for PDO response');
++                            }
++                            let finalMsg;
++                            //eslint-disable-next-line max-depth
++                            if (cachedData && typeof cachedData === 'object') {
++                                // Apply decoded message content onto cached metadata (from official fix)
++                                // This preserves LID details, timestamps, pushName, etc.
++                                cachedData.message = webMessageInfo.message;
++                                if (webMessageInfo.messageTimestamp) {
++                                    cachedData.messageTimestamp = webMessageInfo.messageTimestamp;
++                                }
++                                finalMsg = cachedData;
++                                logger.error({ session: meId, msgId }, 'CTWA_TRACE: Merged PDO content with cached metadata');
++                            }
++                            else {
++                                finalMsg = webMessageInfo;
++                            }
++                            // Apply LID resolution and JID normalization (our enhancement)
++                            if (finalMsg.key?.remoteJid) {
++                                const rawJid = finalMsg.key.remoteJid;
 +                                if (isLidUser(rawJid)) {
 +                                    try {
 +                                        const pn = await signalRepository.lidMapping.getPNForLID(rawJid);
 +                                        if (pn) {
 +                                            const phoneJid = jidNormalizedUser(pn.includes('@') ? pn : `${pn}@s.whatsapp.net`);
 +                                            logger.error({ session: meId, lid: rawJid, resolved: phoneJid }, 'CTWA: Resolved LID to phone number for recovered message');
-+                                            webMessageInfo.key.remoteJidAlt = rawJid;
-+                                            webMessageInfo.key.remoteJid = phoneJid;
++                                            finalMsg.key.remoteJidAlt = rawJid;
++                                            finalMsg.key.remoteJid = phoneJid;
 +                                        }
 +                                        else {
 +                                            logger.error({ session: meId, lid: rawJid }, 'CTWA: Could not resolve LID to phone number - no mapping found');
@@ -264,34 +339,41 @@ index 7927483..76913a2 100644
 +                                    const normalized = jidNormalizedUser(rawJid);
 +                                    if (normalized !== rawJid) {
 +                                        logger.error({ session: meId, rawJid, normalized }, 'CTWA: Normalized remoteJid (stripped device suffix)');
-+                                        webMessageInfo.key.remoteJid = normalized;
++                                        finalMsg.key.remoteJid = normalized;
 +                                    }
 +                                }
 +                            }
-+                            // Apply cleanMessage normalization (same as normal messages)
 +                            // Normalize participant JID if present
-+                            if (webMessageInfo.key?.participant) {
-+                                const normalizedParticipant = jidNormalizedUser(webMessageInfo.key.participant);
-+                                if (normalizedParticipant !== webMessageInfo.key.participant) {
-+                                    webMessageInfo.key.participant = normalizedParticipant;
++                            if (finalMsg.key?.participant) {
++                                const normalizedParticipant = jidNormalizedUser(finalMsg.key.participant);
++                                if (normalizedParticipant !== finalMsg.key.participant) {
++                                    finalMsg.key.participant = normalizedParticipant;
 +                                }
 +                            }
-+                            const recoveredContent = webMessageInfo.message?.conversation
-+                                || webMessageInfo.message?.extendedTextMessage?.text
-+                                || webMessageInfo.message?.imageMessage?.caption
-+                                || webMessageInfo.message?.videoMessage?.caption
-+                                || (webMessageInfo.message?.imageMessage ? '[image]' : '')
-+                                || (webMessageInfo.message?.videoMessage ? '[video]' : '')
-+                                || (webMessageInfo.message?.audioMessage ? '[audio]' : '')
-+                                || (webMessageInfo.message?.documentMessage ? '[document]' : '')
-+                                || (webMessageInfo.message?.stickerMessage ? '[sticker]' : '')
-+                                || (webMessageInfo.message?.contactMessage ? '[contact]' : '')
-+                                || (webMessageInfo.message?.locationMessage ? '[location]' : '')
++                            const recoveredContent = finalMsg.message?.conversation
++                                || finalMsg.message?.extendedTextMessage?.text
++                                || finalMsg.message?.imageMessage?.caption
++                                || finalMsg.message?.videoMessage?.caption
++                                || (finalMsg.message?.imageMessage ? '[image]' : '')
++                                || (finalMsg.message?.videoMessage ? '[video]' : '')
++                                || (finalMsg.message?.audioMessage ? '[audio]' : '')
++                                || (finalMsg.message?.documentMessage ? '[document]' : '')
++                                || (finalMsg.message?.stickerMessage ? '[sticker]' : '')
++                                || (finalMsg.message?.contactMessage ? '[contact]' : '')
++                                || (finalMsg.message?.locationMessage ? '[location]' : '')
 +                                || '[unknown type]';
-+                            logger.error({ session: meId, msgId: webMessageInfo.key?.id, remoteJid: webMessageInfo.key?.remoteJid, recoveredContent, requestId: response.stanzaId }, 'CTWA: Message recovered from phone via PDO');
-                             setTimeout(() => {
-                                 ev.emit('messages.upsert', {
-                                     messages: [webMessageInfo],
++                            logger.error({ session: meId, msgId: finalMsg.key?.id, remoteJid: finalMsg.key?.remoteJid, recoveredContent, requestId: response.stanzaId }, 'CTWA: Message recovered from phone via PDO');
++                            ev.emit('messages.upsert', {
++                                messages: [finalMsg],
++                                type: 'notify',
++                                requestId: response.stanzaId
++                            });
++                        }
++                        catch (err) {
++                            logger.error({ session: meId, err, stanzaId: response.stanzaId }, 'CTWA: Failed to decode placeholder resend response');
+                         }
+                     }
+                 }
 diff --git a/node_modules/baileys/lib/Utils/validate-connection.js b/node_modules/baileys/lib/Utils/validate-connection.js
 index 42fb902..38a2e0c 100644
 --- a/node_modules/baileys/lib/Utils/validate-connection.js
