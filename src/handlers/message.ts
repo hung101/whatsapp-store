@@ -17,9 +17,23 @@ const getKeyAuthor = (key: WAMessageKey | undefined | null) =>
  * Stub messages are system notifications (e.g., E2E encryption notices, message deletions)
  * that have a messageStubType but no message body.
  * These don't contain useful chat content and should be skipped.
+ *
+ * Exception: CTWA (Click-to-WhatsApp) placeholder stubs (messageStubType=2,
+ * stubParam="Message absent from node") are saved as placeholder records so
+ * there's a trace of the customer message even if PDO recovery fails.
+ * The record will be updated with actual content if recovery succeeds later.
  */
 const isEmptyStubMessage = (message: proto.IWebMessageInfo): boolean => {
-  return message.messageStubType != null && message.messageStubType !== 0 && !message.message;
+  if (message.messageStubType == null || message.messageStubType === 0) return false;
+  if (message.message) return false;
+
+  // Allow CTWA placeholder stubs through — save as placeholder record
+  const stubParam = message.messageStubParameters?.[0];
+  if (message.messageStubType === 2 && stubParam === 'Message absent from node') {
+    return false; // Not "empty" for our purposes — save it
+  }
+
+  return true;
 };
 
 /**
@@ -422,19 +436,39 @@ export default function messageHandler(sessionId: string, event: BaileysEventEmi
 
             const jid = resolveRemoteJid(message.key, message, lidMappingCache);
             const data = transformPrisma(message);
-            
+
             // Validate data before upsert
             const validatedData = validateMessageData(data);
-            
+
             // Log if any fields were filtered out during validation
             if (Object.keys(validatedData).length !== Object.keys(data).length) {
-              logger.info({ 
+              logger.info({
                 messageId: message.key.id,
                 originalFieldCount: Object.keys(data).length,
                 validatedFieldCount: Object.keys(validatedData).length
               }, 'Message data was filtered during validation');
             }
-            
+
+            // CTWA stub cleanup: when a recovered message arrives with a phone number JID,
+            // delete any existing stub record saved under the LID JID (different remoteJid, same id).
+            // This happens because the stub is saved with @lid before LID resolution,
+            // and the recovered message arrives with @s.whatsapp.net after PDO resolves the LID.
+            if (message.key.id && message.message && jid.includes('@s.whatsapp.net')) {
+              const altJid = message.key.remoteJidAlt;
+              if (altJid && altJid.endsWith('@lid')) {
+                try {
+                  const deleted = await prisma.message.deleteMany({
+                    where: { id: message.key.id, remoteJid: altJid, sessionId },
+                  });
+                  if (deleted.count > 0) {
+                    logger.info({ messageId: message.key.id, lidJid: altJid, phoneJid: jid }, 'CTWA: Cleaned up LID stub record after PDO recovery');
+                  }
+                } catch (cleanupErr) {
+                  logger.error({ error: cleanupErr, messageId: message.key.id }, 'CTWA: Failed to clean up LID stub record');
+                }
+              }
+            }
+
             await retryDatabaseOperation(
               () => prisma.message.upsert({
                 select: { pkId: true },
