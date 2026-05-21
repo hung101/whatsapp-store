@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -I --max-time 10 https://github.com)",
+      "Bash(git ls-remote *)"
+    ]
+  }
+}
